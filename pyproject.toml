@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labelflat"
+version = "0.1.0"
+description = "Flatten a wine label from a single photo of a cylindrical bottle"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.24", "opencv-python-headless>=4.8", "matplotlib>=3.7", "pillow>=10"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+labelflat-app = "labelflat.app:main"
+
+[tool.setuptools]
+packages = ["labelflat"]
