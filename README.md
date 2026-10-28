@@ -42,7 +42,19 @@ cd label-flatenner
 pip install -r requirements.txt        # or: pip install -e .[test]
 ```
 
-## Interactive explorer
+## In the browser (iPad, phone, anywhere)
+
+`web/` holds the same method rewritten in plain JavaScript: `engine.js` is the
+renderer and flattening, `index.html` is the touch-friendly explorer. Open
+`web/index.html` in any modern browser, or serve the folder with GitHub Pages.
+The engine has its own tests:
+
+```bash
+python -c "from labelflat import make_label; make_label(75,110,8).astype('<f4').tofile('label_75.f32')"
+node web/test/engine.test.js label_75.f32
+```
+
+## Interactive explorer (desktop Python)
 
 ```bash
 python -m labelflat.app

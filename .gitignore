@@ -6,3 +6,5 @@ build/
 dist/
 .venv/
 out*.png
+*.f32
+web/_preview.html

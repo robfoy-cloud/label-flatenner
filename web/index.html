@@ -1,0 +1,354 @@
+<title>Label Flattener</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a bench instrument. Controls rail | the photo | true label over recovered label.
+   Narrower screens fold to photo + labels, then the controls underneath. */
+:root {
+  --bg: #edf0ee;          /* pale bottle-glass grey */
+  --panel: #fbfcfb;
+  --ink: #17211c;
+  --muted: #5d6b64;
+  --rule: #d3dbd6;
+  --accent: #8e2440;      /* claret: the recovered grid and active controls */
+  --accent-ink: #ffffff;
+  --glass: #1f5a3e;       /* bottle green: secondary marks */
+  --warn-bg: #fbeee9;
+  --warn-ink: #8a2b14;
+  --good: #2f7a4e;
+  --font-ui: "Familjen Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --r: 10px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1513; --panel: #161e1b; --ink: #e3eae6; --muted: #94a39b; --rule: #2a3631;
+    --accent: #e07893; --accent-ink: #1a0a10; --glass: #74c29a;
+    --warn-bg: #3a1c14; --warn-ink: #ffb59c; --good: #7fd3a3; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1513; --panel: #161e1b; --ink: #e3eae6; --muted: #94a39b; --rule: #2a3631;
+  --accent: #e07893; --accent-ink: #1a0a10; --glass: #74c29a;
+  --warn-bg: #3a1c14; --warn-ink: #ffb59c; --good: #7fd3a3; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-ui); font-size: 15px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 14px 28px;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 1400px; margin: 0 auto; display: grid; gap: 14px; }
+
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 20px; }
+h1 { margin: 0; font-size: 1.55rem; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+h1 span { color: var(--accent); }
+header p { margin: 0; color: var(--muted); max-width: 62ch; }
+header a { color: var(--accent); }
+
+.bench { display: grid; gap: 14px; grid-template-columns: 290px minmax(0, 1fr) minmax(220px, 0.55fr); align-items: start; }
+@media (max-width: 1080px) { .bench { grid-template-columns: minmax(0, 1fr) minmax(200px, 0.62fr); } .controls { grid-column: 1 / -1; order: 3; } }
+@media (max-width: 640px)  { .bench { grid-template-columns: minmax(0, 1fr); } }
+
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); padding: 12px; min-width: 0; }
+.eyebrow { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); font-weight: 600; margin: 0 0 8px; }
+
+/* photo */
+.photo { display: grid; gap: 10px; }
+.photo-frame { position: relative; border-radius: 6px; overflow: hidden; background: #c8cdd7; }
+#photo { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; max-width: 100%; }
+.warn {
+  position: absolute; left: 10px; right: 10px; top: 10px;
+  background: var(--warn-bg); color: var(--warn-ink); border: 1px solid currentColor;
+  border-radius: 8px; padding: 8px 10px; font-size: 0.86rem; line-height: 1.35;
+}
+.photo-bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; }
+
+/* stats */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin: 0; }
+.stat { display: grid; gap: 1px; }
+.stat dt { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.stat dd { margin: 0; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 0.92rem; }
+.stat dd small { color: var(--muted); font-size: 0.8rem; }
+.big { font-size: 1.35rem !important; font-weight: 500; color: var(--accent); }
+
+/* labels */
+.labels { display: grid; gap: 12px; }
+figure { margin: 0; display: grid; gap: 8px; justify-items: center; }
+figcaption { width: 100%; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; font-weight: 600; font-size: 0.95rem; }
+figcaption .dim { font-family: var(--font-num); font-weight: 400; font-size: 0.8rem; color: var(--muted); }
+.label-canvas { display: block; max-width: 100%; height: auto; max-height: 42vh; width: auto; border-radius: 3px; box-shadow: 0 0 0 1px var(--rule); background: var(--bg); }
+
+/* controls */
+.controls { display: grid; gap: 14px; }
+.sliders { display: grid; gap: 12px 18px; grid-template-columns: 1fr; }
+@media (max-width: 1080px) { .sliders { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); } }
+.slider { display: grid; gap: 4px; }
+.slider-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.slider label { font-weight: 500; }
+.slider output { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--accent); min-width: 6ch; text-align: right; }
+.slider .hint { font-size: 0.78rem; color: var(--muted); }
+
+input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 32px; background: transparent; margin: 0; touch-action: pan-y; }
+input[type="range"]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: linear-gradient(to right, var(--accent) var(--p, 50%), var(--rule) var(--p, 50%)); }
+input[type="range"]::-moz-range-track { height: 6px; border-radius: 3px; background: var(--rule); }
+input[type="range"]::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--accent); }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; margin-top: -10px; border-radius: 50%; background: var(--panel); border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+input[type="range"]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: var(--panel); border: 2px solid var(--accent); }
+input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 999px; padding: 2px; background: var(--bg); }
+.seg button { font: inherit; font-size: 0.82rem; font-weight: 600; border: 0; background: transparent; color: var(--muted); padding: 5px 11px; border-radius: 999px; cursor: pointer; min-height: 30px; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.seg button:focus-visible, .btn:focus-visible, .toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.toggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; user-select: none; }
+.toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.toggle span { width: 38px; height: 22px; border-radius: 11px; background: var(--rule); position: relative; transition: background 0.15s; flex: none; }
+.toggle span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--panel); transition: transform 0.15s; }
+.toggle input:checked + span { background: var(--accent); }
+.toggle input:checked + span::after { transform: translateX(16px); }
+
+.btn { font: inherit; font-weight: 600; font-size: 0.88rem; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 7px 12px; cursor: pointer; min-height: 36px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+
+.about { color: var(--muted); font-size: 0.88rem; max-width: 72ch; display: grid; gap: 6px; }
+.about p { margin: 0; }
+.about strong { color: var(--ink); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Label <span>Flattener</span></h1>
+    <p>Move the camera around a synthetic bottle and compare the label recovered from the photo with the true one. <a href="https://github.com/robfoy-cloud/label-flatenner" target="_blank" rel="noopener">Source on GitHub</a></p>
+  </header>
+
+  <div class="bench">
+    <section class="panel controls" aria-label="Viewpoint controls">
+      <div class="row">
+        <p class="eyebrow" style="margin:0">Viewpoint</p>
+        <button class="btn" id="reset" type="button">Reset</button>
+      </div>
+      <div class="sliders" id="sliders"></div>
+    </section>
+
+    <section class="panel photo" aria-label="Synthetic photo">
+      <div class="photo-frame">
+        <canvas id="photo" width="720" height="540" aria-label="Rendered photo of the bottle with the recovered grid"></canvas>
+        <div class="warn" id="warn" role="status" hidden></div>
+      </div>
+      <div class="photo-bar">
+        <label class="toggle"><input type="checkbox" id="grid" checked><span aria-hidden="true"></span>Show grid on photo</label>
+        <span id="timing" style="color:var(--muted);font-size:0.8rem;font-family:var(--font-num)"></span>
+      </div>
+      <dl class="stats" id="stats">
+        <div class="stat"><dt>Error, cylinder model</dt><dd><span class="big" id="s-cyl">–</span> <small id="s-cylmax"></small></dd></div>
+        <div class="stat"><dt>Error, naive</dt><dd><span class="big" style="color:var(--muted)" id="s-naive">–</span> <small id="s-naivemax"></small></dd></div>
+        <div class="stat"><dt>Width ÷ height</dt><dd id="s-aspect">–</dd></div>
+        <div class="stat"><dt>Wrap around bottle</dt><dd id="s-wrap">–</dd></div>
+        <div class="stat"><dt>Glass beside edges</dt><dd id="s-gaps">–</dd></div>
+      </dl>
+    </section>
+
+    <section class="labels" aria-label="Labels">
+      <figure class="panel">
+        <figcaption>True label <span class="dim" id="true-dim"></span></figcaption>
+        <canvas class="label-canvas" id="truth" width="360" height="528" aria-label="The true label artwork"></canvas>
+      </figure>
+      <figure class="panel">
+        <figcaption>Recovered label
+          <span class="seg" role="group" aria-label="Recovery method">
+            <button type="button" id="m-cyl" aria-pressed="true">Cylinder model</button>
+            <button type="button" id="m-naive" aria-pressed="false">Naive</button>
+          </span>
+        </figcaption>
+        <canvas class="label-canvas" id="recovered" width="360" height="528" aria-label="The label recovered from the photo"></canvas>
+      </figure>
+    </section>
+  </div>
+
+  <section class="about">
+    <p><strong>How it works.</strong> The bottle's two outlines and the label's side edges meet at a vanishing point. Looking down the bottle, the outlines are tangents to a circle, which gives the true angle around the bottle for every vertical line. Rows are placed along each line with the cross-ratio, and each grid cell is mapped flat with its own homography. <strong>Naive</strong> spaces the columns evenly in the photo instead, which squashes the ends.</p>
+    <p><strong>Errors</strong> are measured on the label in millimetres: every pixel of the recovered label is traced back through the true geometry to the point it really shows. The bottle is 74 mm across; the photo is 720 × 540 px with a phone-like lens.</p>
+  </section>
+</div>
+
+<script src="engine.js"></script>
+<script>
+(function () {
+  "use strict";
+  const LF = window.LabelFlat;
+  const W = 720, H = 540, PPM = 8;
+  const PARAMS = [
+    { key: "elevation", label: "Camera elevation", unit: "°", min: -30, max: 60, step: 1, def: 17, hint: "Above (+) or below (−) the label centre" },
+    { key: "rotation",  label: "Bottle rotation",  unit: "°", min: -60, max: 60, step: 1, def: 0,  hint: "Spin the bottle away from the camera" },
+    { key: "lean",      label: "Bottle lean",      unit: "°", min: -30, max: 30, step: 1, def: 4,  hint: "Tilt of the bottle in the frame" },
+    { key: "pan",       label: "Off-centre",       unit: "°", min: -15, max: 15, step: 1, def: 3,  hint: "Bottle away from the middle of the photo" },
+    { key: "distance",  label: "Distance",         unit: " mm", min: 150, max: 600, step: 5, def: 260, hint: "Camera to bottle axis" },
+    { key: "labelW",    label: "Label width",      unit: " mm", min: 40, max: 115, step: 1, def: 75, hint: "Typical wine labels are 80–100 mm" },
+    { key: "fErr",      label: "Focal length error", unit: "%", min: -30, max: 30, step: 1, def: 0, hint: "How wrong the assumed lens is" },
+    { key: "noise",     label: "Sensor noise",     unit: "", min: 0, max: 15, step: 0.5, def: 1.5, hint: "Grain, in grey levels" },
+  ];
+  const state = Object.fromEntries(PARAMS.map((p) => [p.key, p.def]));
+  let method = "cyl", showGrid = true, last = null;
+
+  // ---------- controls
+  const host = document.getElementById("sliders");
+  const inputs = {};
+  for (const p of PARAMS) {
+    const id = "s-" + p.key;
+    const el = document.createElement("div");
+    el.className = "slider";
+    el.innerHTML = `<div class="slider-head"><label for="${id}">${p.label}</label><output for="${id}" id="${id}-out"></output></div>
+      <input type="range" id="${id}" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.def}">
+      <span class="hint">${p.hint}</span>`;
+    host.appendChild(el);
+    const input = el.querySelector("input"), out = el.querySelector("output");
+    inputs[p.key] = { input, out, p };
+    const sync = () => {
+      state[p.key] = parseFloat(input.value);
+      const v = state[p.key];
+      out.textContent = (p.key === "fErr" && v > 0 ? "+" : "") + (p.step < 1 ? v.toFixed(1) : v.toFixed(0)) + p.unit;
+      input.style.setProperty("--p", ((v - p.min) / (p.max - p.min)) * 100 + "%");
+    };
+    sync();
+    input.addEventListener("input", () => { sync(); schedule(true); });
+    input.addEventListener("change", () => { sync(); schedule(false); });
+  }
+  document.getElementById("reset").addEventListener("click", () => {
+    for (const { input, p } of Object.values(inputs)) { input.value = p.def; input.dispatchEvent(new Event("input")); }
+    schedule(false);
+  });
+  const mCyl = document.getElementById("m-cyl"), mNaive = document.getElementById("m-naive");
+  const setMethod = (m) => { method = m; mCyl.setAttribute("aria-pressed", m === "cyl"); mNaive.setAttribute("aria-pressed", m === "naive"); draw(); };
+  mCyl.addEventListener("click", () => setMethod("cyl"));
+  mNaive.addEventListener("click", () => setMethod("naive"));
+  document.getElementById("grid").addEventListener("change", (e) => { showGrid = e.target.checked; draw(); });
+
+  // ---------- label artwork (drawn once per width)
+  const labelCache = new Map();
+  function makeLabel(wmm, hmm) {
+    const key = wmm + "x" + hmm;
+    if (labelCache.has(key)) return labelCache.get(key);
+    const Wl = wmm * PPM, Hl = hmm * PPM, c = document.createElement("canvas");
+    c.width = Wl; c.height = Hl;
+    const g = c.getContext("2d"), mm = (x) => x * PPM;
+    g.fillStyle = "rgb(240,230,205)"; g.fillRect(0, 0, Wl, Hl);
+    g.strokeStyle = "rgb(185,175,160)"; g.lineWidth = mm(0.2);
+    for (let x = 0; x <= wmm; x += 10) { g.beginPath(); g.moveTo(mm(x), 0); g.lineTo(mm(x), Hl); g.stroke(); }
+    for (let y = 0; y <= hmm; y += 10) { g.beginPath(); g.moveTo(0, mm(y)); g.lineTo(Wl, mm(y)); g.stroke(); }
+    g.strokeStyle = "rgb(120,30,40)"; g.lineWidth = mm(0.6); g.strokeRect(mm(4), mm(4), Wl - mm(8), Hl - mm(8));
+    g.strokeStyle = "rgb(30,60,110)"; g.lineWidth = mm(0.5);
+    for (const [cx, cy, r] of [[wmm / 2, 62, Math.min(18, wmm / 4)], [20, 95, 7], [wmm - 20, 95, 7]]) {
+      g.beginPath(); g.arc(mm(cx), mm(cy), mm(r), 0, 2 * Math.PI); g.stroke();
+    }
+    const s = Math.min(1, wmm / 90);
+    g.fillStyle = "rgb(40,30,30)"; g.textAlign = "center"; g.textBaseline = "top";
+    g.font = `700 ${mm(9 * s)}px Georgia, "Times New Roman", serif`;
+    g.fillText("CHÂTEAU", Wl / 2, mm(14)); g.fillText("FLATLAND", Wl / 2, mm(26));
+    g.font = `400 ${mm(5 * s)}px "Helvetica Neue", Arial, sans-serif`;
+    g.fillText("GRAND VIN · 2026", Wl / 2, mm(38));
+    const px = g.getImageData(0, 0, Wl, Hl).data, data = new Float32Array(Wl * Hl * 3);
+    for (let i = 0, j = 0; i < px.length; i += 4, j += 3) { data[j] = px[i] / 255; data[j + 1] = px[i + 1] / 255; data[j + 2] = px[i + 2] / 255; }
+    const lab = { w: Wl, h: Hl, data, canvas: c };
+    labelCache.set(key, lab);
+    return lab;
+  }
+
+  // ---------- compute (throttled to one frame at a time)
+  let pending = null, busy = false;
+  function schedule(fast) { pending = { fast }; if (!busy) requestAnimationFrame(run); }
+  function run() {
+    if (!pending) return;
+    const job = pending; pending = null; busy = true;
+    try { compute(job.fast); } finally { busy = false; }
+    if (pending) requestAnimationFrame(run);
+  }
+  function compute(fast) {
+    const t0 = performance.now();
+    const sc = LF.Scene.fromView({ ...state, W, H });
+    const label = makeLabel(Math.round(state.labelW), 110);
+    const img = sc.render(label, fast ? 1 : 2, state.noise, 7);
+    const t1 = performance.now();
+    let res = null, err = null, sCyl = null, sNaive = null;
+    try {
+      res = LF.flatten(img, W, H, sc.f * (1 + state.fErr / 100), { outW: 360 });
+      sCyl = LF.score(sc, res.cyl.map, res.outW, res.outH, fast ? 6 : 3);
+      sNaive = LF.score(sc, res.naive.map, res.outW, res.outH, fast ? 6 : 3);
+    } catch (e) { err = e.message || String(e); }
+    last = { sc, img, label, res, err, sCyl, sNaive, tr: t1 - t0, tf: performance.now() - t1, fast };
+    draw();
+  }
+
+  // ---------- drawing
+  const photo = document.getElementById("photo"), pctx = photo.getContext("2d");
+  const truth = document.getElementById("truth"), tctx = truth.getContext("2d");
+  const rec = document.getElementById("recovered"), rctx = rec.getContext("2d");
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const toImageData = (rgb, w, h) => {
+    const id = new ImageData(w, h), d = id.data;
+    for (let i = 0, j = 0; j < rgb.length; i += 4, j += 3) { d[i] = rgb[j]; d[i + 1] = rgb[j + 1]; d[i + 2] = rgb[j + 2]; d[i + 3] = 255; }
+    return id;
+  };
+  const fmt = (x, d = 2) => (isFinite(x) ? x.toFixed(d) : "–");
+
+  function draw() {
+    if (!last) return;
+    const { sc, img, label, res, err, sCyl, sNaive } = last;
+    pctx.putImageData(toImageData(img, W, H), 0, 0);
+    if (res && showGrid) {
+      const nodes = method === "naive" ? res.naiveNodes : res.nodes;
+      pctx.strokeStyle = method === "naive" ? "rgba(47,125,225,0.9)" : "rgba(232,66,60,0.9)";
+      pctx.lineWidth = 0.8;
+      const step = 2;
+      for (let j = 0; j < nodes.length; j += step) { pctx.beginPath(); nodes[j].forEach((p, i) => (i ? pctx.lineTo(p[0], p[1]) : pctx.moveTo(p[0], p[1]))); pctx.stroke(); }
+      for (let i = 0; i < nodes[0].length; i += step) { pctx.beginPath(); nodes.forEach((row, j) => (j ? pctx.lineTo(row[i][0], row[i][1]) : pctx.moveTo(row[i][0], row[i][1]))); pctx.stroke(); }
+    }
+    // true label, scaled to 360 px wide
+    truth.width = 360; truth.height = Math.round((360 * label.h) / label.w);
+    tctx.drawImage(label.canvas, 0, 0, truth.width, truth.height);
+    document.getElementById("true-dim").textContent = `${Math.round(sc.lw)} × ${Math.round(sc.lh)} mm`;
+
+    const warn = [];
+    const gaps = sc.edgeGaps();
+    if (!sc.labelVisible()) warn.push("A label edge is behind the bottle's outline from this viewpoint, so that corner can't be seen or recovered.");
+    else gaps.forEach((g, i) => { if (g < 3) warn.push(`The ${i ? "right" : "left"} label edge is only ${g.toFixed(1)} px from the bottle's outline. With so little glass beside it, its position is poorly determined.`); });
+
+    if (res) {
+      const r = method === "naive" ? res.naive : res.cyl;
+      rec.width = res.outW; rec.height = res.outH;
+      rctx.putImageData(toImageData(r.rgb, res.outW, res.outH), 0, 0);
+      document.getElementById("s-cyl").textContent = fmt(sCyl.rms) + " mm";
+      document.getElementById("s-cylmax").textContent = "max " + fmt(sCyl.max, 1);
+      document.getElementById("s-naive").textContent = fmt(sNaive.rms) + " mm";
+      document.getElementById("s-naivemax").textContent = "max " + fmt(sNaive.max, 1);
+      document.getElementById("s-aspect").innerHTML = `${fmt(res.aspect, 3)} <small>true ${fmt(sc.lw / sc.lh, 3)}</small>`;
+      document.getElementById("s-wrap").innerHTML = `${fmt(LF.deg(res.model.width), 1)}° <small>true ${fmt(LF.deg(sc.th1 - sc.th0), 1)}°</small>`;
+    } else {
+      rec.width = 360; rec.height = 528;
+      rctx.fillStyle = css("--panel"); rctx.fillRect(0, 0, rec.width, rec.height);
+      rctx.fillStyle = css("--warn-ink"); rctx.font = "600 18px " + css("--font-ui"); rctx.textAlign = "center";
+      rctx.fillText("No label recovered", rec.width / 2, rec.height / 2 - 10);
+      rctx.font = "400 14px " + css("--font-ui"); rctx.fillStyle = css("--muted");
+      rctx.fillText("from this viewpoint", rec.width / 2, rec.height / 2 + 14);
+      for (const id of ["s-cyl", "s-naive", "s-aspect", "s-wrap"]) document.getElementById(id).textContent = "–";
+      document.getElementById("s-cylmax").textContent = ""; document.getElementById("s-naivemax").textContent = "";
+      if (err) warn.push("The edges couldn't be found: " + err + ".");
+    }
+    document.getElementById("s-gaps").innerHTML = `${fmt(gaps[0], 1)} · ${fmt(gaps[1], 1)} <small>px, left · right</small>`;
+    document.getElementById("timing").textContent = `render ${Math.round(last.tr)} ms · flatten ${Math.round(last.tf)} ms${last.fast ? " · preview" : ""}`;
+    const w = document.getElementById("warn");
+    w.hidden = warn.length === 0; w.textContent = warn.join(" ");
+  }
+
+  schedule(false);
+})();
+</script>
