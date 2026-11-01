@@ -155,6 +155,7 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
         <div class="stat"><dt>Width ÷ height</dt><dd id="s-aspect">–</dd></div>
         <div class="stat"><dt>Wrap around bottle</dt><dd id="s-wrap">–</dd></div>
         <div class="stat"><dt>Glass beside edges</dt><dd id="s-gaps">–</dd></div>
+        <div class="stat"><dt>Shading across label</dt><dd id="s-shade">–</dd></div>
       </dl>
     </section>
 
@@ -171,17 +172,20 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
           </span>
         </figcaption>
         <canvas class="label-canvas" id="recovered" width="360" height="528" aria-label="The label recovered from the photo"></canvas>
+        <label class="toggle" style="justify-self:start"><input type="checkbox" id="even" checked><span aria-hidden="true"></span>Even out shading</label>
       </figure>
     </section>
   </div>
 
   <section class="about">
     <p><strong>How it works.</strong> The bottle's two outlines and the label's side edges meet at a vanishing point. Looking down the bottle, the outlines are tangents to a circle, which gives the true angle around the bottle for every vertical line. Rows are placed along each line with the cross-ratio, and each grid cell is mapped flat with its own homography. <strong>Naive</strong> spaces the columns evenly in the photo instead, which squashes the ends.</p>
+    <p><strong>Shading.</strong> On a round bottle the label faces one way all the way down each column, so the light changes only across it. The explorer finds the paper by its colour, which shading doesn't change, fits a smooth lighting curve to how bright the paper is in each column, and divides it out. The shading figure compares the recovered label with the true one: how much darker the darkest part is than the brightest, before and after.</p>
     <p><strong>Errors</strong> are measured on the label in millimetres: every pixel of the recovered label is traced back through the true geometry to the point it really shows. The bottle is 74 mm across; the photo is 720 × 540 px with a phone-like lens.</p>
   </section>
 </div>
 
 <script src="engine.js"></script>
+<script src="labelgeo.js"></script>
 <script>
 (function () {
   "use strict";
@@ -194,11 +198,12 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
     { key: "pan",       label: "Off-centre",       unit: "°", min: -15, max: 15, step: 1, def: 3,  hint: "Bottle away from the middle of the photo" },
     { key: "distance",  label: "Distance",         unit: " mm", min: 150, max: 600, step: 5, def: 260, hint: "Camera to bottle axis" },
     { key: "labelW",    label: "Label width",      unit: " mm", min: 40, max: 115, step: 1, def: 75, hint: "Typical wine labels are 80–100 mm" },
+    { key: "light",     label: "Light direction",  unit: "°", min: -70, max: 70, step: 5, def: 35, hint: "Where the lamp is, round the bottle from the camera" },
     { key: "fErr",      label: "Focal length error", unit: "%", min: -30, max: 30, step: 1, def: 0, hint: "How wrong the assumed lens is" },
     { key: "noise",     label: "Sensor noise",     unit: "", min: 0, max: 15, step: 0.5, def: 1.5, hint: "Grain, in grey levels" },
   ];
   const state = Object.fromEntries(PARAMS.map((p) => [p.key, p.def]));
-  let method = "cyl", showGrid = true, last = null;
+  let method = "cyl", showGrid = true, even = true, last = null;
 
   // ---------- controls
   const host = document.getElementById("sliders");
@@ -232,6 +237,7 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
   mCyl.addEventListener("click", () => setMethod("cyl"));
   mNaive.addEventListener("click", () => setMethod("naive"));
   document.getElementById("grid").addEventListener("change", (e) => { showGrid = e.target.checked; draw(); });
+  document.getElementById("even").addEventListener("change", (e) => { even = e.target.checked; draw(); });
 
   // ---------- label artwork (drawn once per width)
   const labelCache = new Map();
@@ -283,9 +289,28 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
       res = LF.flatten(img, W, H, sc.f * (1 + state.fErr / 100), { outW: 360 });
       sCyl = LF.score(sc, res.cyl.map, res.outW, res.outH, fast ? 6 : 3);
       sNaive = LF.score(sc, res.naive.map, res.outW, res.outH, fast ? 6 : 3);
+      res.even = Uint8ClampedArray.from(res.cyl.rgb);
+      res.evenInfo = LabelGeo.evenLight(res.even, res.outW, res.outH, 3, res.model.thL, res.model.thR);
+      res.shade = [shadeSpread(sc, label, res.cyl.rgb, res.cyl.map, res.outW, res.outH), shadeSpread(sc, label, res.even, res.cyl.map, res.outW, res.outH)];
     } catch (e) { err = e.message || String(e); }
     last = { sc, img, label, res, err, sCyl, sNaive, tr: t1 - t0, tf: performance.now() - t1, fast };
     draw();
+  }
+
+  // how uneven the light is on the recovered label: darkest column vs brightest, after
+  // dividing out the true artwork (paper pixels only)
+  function shadeSpread(sc, label, rgb, map, w, h) {
+    const nb = 20, bins = Array.from({ length: nb }, () => []), o = [0, 0], L = label.data;
+    for (let y = 0; y < h; y += 3) for (let x = 0; x < w; x += 3) {
+      const k = y * w + x; if (!sc.pixelToLabelMM(map[2 * k], map[2 * k + 1], o)) continue;
+      const lx = Math.round((o[0] / sc.lw) * (label.w - 1)), ly = Math.round((o[1] / sc.lh) * (label.h - 1));
+      if (lx < 0 || ly < 0 || lx >= label.w || ly >= label.h) continue;
+      const j = (ly * label.w + lx) * 3, t = (0.299 * L[j] + 0.587 * L[j + 1] + 0.114 * L[j + 2]) * 255;
+      if (t < 150) continue;
+      bins[Math.min(nb - 1, Math.floor((x / w) * nb))].push((0.299 * rgb[3 * k] + 0.587 * rgb[3 * k + 1] + 0.114 * rgb[3 * k + 2]) / t);
+    }
+    const m = bins.filter((b) => b.length > 8).map((b) => b.sort((a, c) => a - c)[b.length >> 1]);
+    return m.length > 3 ? 1 - Math.min(...m) / Math.max(...m) : NaN;
   }
 
   // ---------- drawing
@@ -325,7 +350,9 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
     if (res) {
       const r = method === "naive" ? res.naive : res.cyl;
       rec.width = res.outW; rec.height = res.outH;
-      rctx.putImageData(toImageData(r.rgb, res.outW, res.outH), 0, 0);
+      rctx.putImageData(toImageData(method === "cyl" && even ? res.even : r.rgb, res.outW, res.outH), 0, 0);
+      const pc = (v) => (isFinite(v) ? Math.round(100 * v) + "%" : "–");
+      document.getElementById("s-shade").innerHTML = method === "naive" ? `${pc(res.shade[0])} <small>cylinder model only</small>` : (even ? `${pc(res.shade[0])} → ${pc(res.shade[1])} <small>evened out</small>` : `${pc(res.shade[0])} <small>evening out is off</small>`);
       document.getElementById("s-cyl").textContent = fmt(sCyl.rms) + " mm";
       document.getElementById("s-cylmax").textContent = "max " + fmt(sCyl.max, 1);
       document.getElementById("s-naive").textContent = fmt(sNaive.rms) + " mm";
@@ -339,7 +366,7 @@ input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-of
       rctx.fillText("No label recovered", rec.width / 2, rec.height / 2 - 10);
       rctx.font = "400 14px " + css("--font-ui"); rctx.fillStyle = css("--muted");
       rctx.fillText("from this viewpoint", rec.width / 2, rec.height / 2 + 14);
-      for (const id of ["s-cyl", "s-naive", "s-aspect", "s-wrap"]) document.getElementById(id).textContent = "–";
+      for (const id of ["s-cyl", "s-naive", "s-aspect", "s-wrap", "s-shade"]) document.getElementById(id).textContent = "–";
       document.getElementById("s-cylmax").textContent = ""; document.getElementById("s-naivemax").textContent = "";
       if (err) warn.push("The edges couldn't be found: " + err + ".");
     }

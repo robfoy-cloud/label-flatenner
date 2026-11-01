@@ -120,6 +120,8 @@
       this.C = [o.camSide, o.camHeight, o.camDist];
       this.Rw = lookAt(this.C, o.target, o.roll ?? 0);
       this.W = o.W; this.H = o.H; this.f = o.f;
+      // light: a distant lamp at `light` degrees round the bottle from the camera (null = old shading)
+      this.light = o.light ?? null; this.ambient = o.ambient ?? 0.5;
       this.cx = this.W / 2; this.cy = this.H / 2;
     }
     static fromView(v) {
@@ -129,7 +131,7 @@
         R: v.R ?? 37, labelW: v.labelW ?? 75, labelH: v.labelH ?? 110, labelCentreDeg: v.rotation ?? 0,
         camSide: 0, camHeight: D * Math.sin(e), camDist: D * Math.cos(e),
         target: [D * Math.tan(rad(v.pan ?? 3)), 0, 0], roll: v.lean ?? 4,
-        W, H, f: v.f ?? 0.75 * W,
+        W, H, f: v.f ?? 0.75 * W, light: v.light ?? null, ambient: v.ambient,
       });
     }
     project(P) {
@@ -183,6 +185,7 @@
       const bg = [200 / 255, 205 / 255, 215 / 255];
       const out3 = [0, 0, 0];
       const span = this.th1 - this.th0, ysp = this.y1 - this.y0;
+      const lit = this.light !== null, phiL = Math.atan2(this.C[0], this.C[2]) + rad(this.light ?? 0), amb = this.ambient;
       for (let oy = 0; oy < ss; oy++) for (let ox = 0; ox < ss; ox++) {
         const dx = (ox + 0.5) / ss - 0.5, dy = (oy + 0.5) / ss - 0.5;
         for (let v = 0; v < H; v++) for (let u = 0; u < W; u++) {
@@ -197,7 +200,7 @@
               const ly = clamp(((this.y1 - y) / ysp) * (Lh - 1), 0, Lh - 1);
               const x0 = Math.floor(lx), y0 = Math.floor(ly);
               const x1 = Math.min(x0 + 1, Lw - 1), y1 = Math.min(y0 + 1, Lh - 1);
-              const fx = lx - x0, fy = ly - y0, m = 0.55 + 0.45 * sh;
+              const fx = lx - x0, fy = ly - y0, m = lit ? amb + (1 - amb) * Math.max(0, Math.cos(th - phiL)) : 0.55 + 0.45 * sh;
               const i00 = (y0 * Lw + x0) * 3, i01 = (y0 * Lw + x1) * 3, i10 = (y1 * Lw + x0) * 3, i11 = (y1 * Lw + x1) * 3;
               const w00 = (1 - fx) * (1 - fy), w01 = fx * (1 - fy), w10 = (1 - fx) * fy, w11 = fx * fy;
               r = m * (L[i00] * w00 + L[i01] * w01 + L[i10] * w10 + L[i11] * w11);
@@ -301,7 +304,7 @@
 
     // label mask: cream paper is red-dominant, glass green-dominant
     let lab = new Uint8Array(N);
-    for (let i = 0; i < N; i++) lab[i] = Rch[i] > 110 && notbg[i] ? 1 : 0;
+    for (let i = 0; i < N; i++) lab[i] = Rch[i] > 90 && notbg[i] ? 1 : 0;
     lab = morph(morph(lab, W, H, 5, true), W, H, 5, false);           // close 5x5
     // largest 8-connected component
     const comp = new Int32Array(N).fill(-1), stack = new Int32Array(N);

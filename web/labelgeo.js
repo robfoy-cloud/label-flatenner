@@ -150,7 +150,7 @@
     const flip = proj(surf(g, g.thl, g.st))[0] > proj(surf(g, g.thr, g.st))[0];
     const tA = flip ? g.thr : g.thl, tB = flip ? g.thl : g.thr;
     return {
-      x: sol.x, B, cam, cost: sol.cost,
+      x: sol.x, B, cam, cost: sol.cost, theta: [tA, tB],
       wrapDeg: (Math.abs(g.thr - g.thl) * 180) / Math.PI,
       aspect: Math.abs(g.thr - g.thl) / Math.abs(g.sb - g.st),
       at(fx, fy) { return px(surf(g, tA + fx * (tB - tA), g.st + fy * (g.sb - g.st))); },
@@ -295,9 +295,142 @@
     for (let i = n; i >= 0; i--) P.push(R.at(i / n, 1)); for (let i = n; i >= 0; i--) P.push(R.at(0, i / n));
     return P;
   }
+  // ---------------------------------------------------------------- shading
+  /* Even out the light across a flattened label.
+     On a cylinder the surface faces one way all the way down each column, so under a
+     distant light the brightness depends only on the angle round the bottle. Lambert's
+     law makes it  a + b·cos θ + c·sin θ  (plus a little curvature for soft or clipped
+     light). Fit that to the paper's brightness in each column, ignoring columns where
+     artwork dominates, and divide it out.
+       pix: Uint8ClampedArray, ch = 3 (RGB) or 4 (RGBA), W x H, edited in place
+       th0, th1: angle round the bottle (radians) at the left and right edges
+     Returns { applied, before, after, curve } where before/after are the spread of the
+     fitted light across the label (0.3 = the darkest part had 30% less light). */
+  function evenLight(pix, W, H, ch, th0, th1, opts = {}) {
+    const span = Math.abs(th1 - th0);
+    if (!(span > (12 * Math.PI) / 180) || W < 16 || H < 16) return { applied: false, before: 0, after: 0 };
+    const nb = Math.min(96, W), q = opts.quantile ?? 0.8, maxGain = opts.maxGain ?? 3;
+    const y0 = Math.floor(H * 0.04), y1 = Math.ceil(H * 0.96), ystep = Math.max(1, Math.floor((y1 - y0) / 240));
+    const lum = (i) => 0.299 * pix[i] + 0.587 * pix[i + 1] + 0.114 * pix[i + 2];
+    // the paper's colour: shading changes how bright it is, not its hue, so find the most common
+    // hue among the brighter pixels and use only pixels of that hue
+    // "bright" is judged within each column, so a shaded part of the label still counts
+    const hist = new Float64Array(64 * 64), nbx = Math.min(48, W), p90 = new Float64Array(nbx);
+    for (let b = 0; b < nbx; b++) {
+      const xa = Math.floor((b * W) / nbx), xb = Math.max(xa + 1, Math.floor(((b + 1) * W) / nbx)), v = [];
+      for (let y = y0; y < y1; y += ystep) for (let x = xa; x < xb; x += 2) v.push(lum((y * W + x) * ch));
+      v.sort((a, c) => a - c); p90[b] = v[Math.floor(0.9 * (v.length - 1))];
+    }
+    const chroma = (i) => { const t = pix[i] + pix[i + 1] + pix[i + 2] + 1e-6; return [pix[i] / t, pix[i + 1] / t]; };
+    for (let y = y0; y < y1; y += ystep) for (let x = 0; x < W; x += 2) {
+      const i = (y * W + x) * ch, L = lum(i); if (L < 25 || L < 0.6 * p90[Math.min(nbx - 1, Math.floor((x * nbx) / W))]) continue;
+      const [a, b] = chroma(i), ia = Math.min(63, Math.max(0, Math.round(a * 128 - 10))), ib = Math.min(63, Math.max(0, Math.round(b * 128 - 10)));
+      hist[ia * 64 + ib] += 1;
+    }
+    // up to three paper colours (labels often have panels in a second colour)
+    const peaks = [], hh = Float64Array.from(hist);
+    for (let n = 0; n < 3; n++) {
+      let pk = 0; for (let k = 1; k < hh.length; k++) if (hh[k] > hh[pk]) pk = k;
+      if (!(hh[pk] > 0) || (peaks.length && hh[pk] < 0.15 * peaks[0].mass)) break;
+      const ia = Math.floor(pk / 64), ib = pk % 64;
+      peaks.push({ a: (ia + 10) / 128, b: (ib + 10) / 128, mass: hh[pk] });
+      for (let da = -3; da <= 3; da++) for (let db = -3; db <= 3; db++) { const ja = ia + da, jb = ib + db; if (ja >= 0 && jb >= 0 && ja < 64 && jb < 64) hh[ja * 64 + jb] = 0; }
+    }
+    const tol = 0.016, NP = peaks.length;
+    const th = new Float64Array(nb), val = new Float64Array(nb), cnt = new Float64Array(nb), grp = new Int32Array(nb);
+    let rows = 0; for (let y = y0; y < y1; y += ystep) rows++;
+    for (let b = 0; b < nb; b++) {
+      const xa = Math.floor((b * W) / nb), xb = Math.max(xa + 1, Math.floor(((b + 1) * W) / nb));
+      const xs = Math.max(1, Math.floor((xb - xa) / 3)), v = peaks.map(() => []);
+      for (let y = y0; y < y1; y += ystep) for (let x = xa; x < xb; x += xs) {
+        const i = (y * W + x) * ch, L = lum(i); if (L < 25) continue;
+        const [a, c2] = chroma(i);
+        for (let k = 0; k < NP; k++) if (Math.abs(a - peaks[k].a) < tol && Math.abs(c2 - peaks[k].b) < tol) { v[k].push(L); break; }
+      }
+      th[b] = th0 + ((th1 - th0) * ((xa + xb) / 2)) / W;
+      let k = 0; for (let j = 1; j < NP; j++) if (v[j].length > v[k].length) k = j;
+      grp[b] = k; cnt[b] = v[k].length / (Math.ceil((xb - xa) / xs) * rows);
+      if (v[k].length) { v[k].sort((a, c) => a - c); val[b] = v[k][Math.min(v[k].length - 1, Math.floor(q * v[k].length))]; }
+    }
+    // robust fit (Tukey biweight) with a brightness factor per paper colour; the second
+    // harmonic is damped so artwork can't bend the curve much
+    const basis = (t) => [1, Math.cos(t), Math.sin(t), Math.cos(2 * t), Math.sin(2 * t)], K = 5, ridge = [0, 0, 0, 1, 1];
+    let w0 = Float64Array.from(cnt, (f) => (f < 0.08 ? 0 : Math.min(1, f / 0.3)));
+    if (w0.filter((v) => v > 0).length < nb * 0.4) return { applied: false, before: 0, after: 0 };
+    // the reference colour is the one covering the most columns
+    const cover = new Array(NP).fill(0); for (let b = 0; b < nb; b++) if (w0[b] > 0) cover[grp[b]]++;
+    const ref = cover.indexOf(Math.max(...cover)), sc_ = new Array(NP).fill(1);
+    let w = Float64Array.from(w0), c = null;
+    const vmax = Math.max(...val) || 1;
+    // where the paper colour changes from one column to the next, the light doesn't: the jump
+    // in brightness there is the ratio of the two papers' brightness
+    if (NP > 1) {
+      const good = []; for (let b = 0; b < nb; b++) if (w0[b] > 0) good.push(b);
+      const side = (idx, dir) => {              // up to 3 same-colour columns going away from the boundary
+        const k = grp[good[idx]], pts = [];
+        for (let j = idx; j >= 0 && j < good.length && pts.length < 3; j += dir) { if (grp[good[j]] !== k) break; pts.push([good[j], val[good[j]]]); }
+        return pts;
+      };
+      const at = (pts, x) => {                   // straight-line extrapolation to x
+        if (pts.length < 2) return pts[0][1];
+        const n = pts.length, mx = pts.reduce((a, p) => a + p[0], 0) / n, my = pts.reduce((a, p) => a + p[1], 0) / n;
+        let sxy = 0, sxx = 0; for (const [x0, y0] of pts) { sxy += (x0 - mx) * (y0 - my); sxx += (x0 - mx) ** 2; }
+        return my + (sxx ? sxy / sxx : 0) * (x - mx);
+      };
+      const pairs = {};
+      for (let i = 0; i + 1 < good.length; i++) {
+        const a = good[i], b = good[i + 1]; if (grp[a] === grp[b] || b - a > 4) continue;
+        const L = side(i, -1), R = side(i + 1, 1), x = (a + b) / 2, la = at(L, x), rb = at(R, x);
+        if (!(la > 0 && rb > 0)) continue;
+        const key = grp[a] + ">" + grp[b]; (pairs[key] = pairs[key] || []).push(rb / la);
+      }
+      const known = { [ref]: 1 };
+      for (let pass = 0; pass < NP; pass++) for (const key in pairs) {
+        const [p0, p1] = key.split(">").map(Number), r = median(pairs[key]);
+        if (known[p0] !== undefined && known[p1] === undefined) known[p1] = known[p0] * r;
+        else if (known[p1] !== undefined && known[p0] === undefined) known[p0] = known[p1] / r;
+      }
+      for (let k = 0; k < NP; k++) sc_[k] = known[k] ?? NaN;
+      // a colour that never meets another: leave it out of the fit rather than guess its brightness
+      for (let b = 0; b < nb; b++) if (!(sc_[grp[b]] > 0)) { w0[b] = 0; }
+      for (let k = 0; k < NP; k++) if (!(sc_[k] > 0)) sc_[k] = 1;
+    }
+    {
+      w = Float64Array.from(w0);
+      const vs = Array.from(val, (v, b) => v / sc_[grp[b]]);
+      for (let it = 0; it < 12; it++) {
+        const A = Array.from({ length: K }, () => new Array(K).fill(0)), r = new Array(K).fill(0);
+        for (let b = 0; b < nb; b++) { const f = basis(th[b]); for (let i = 0; i < K; i++) { r[i] += w[b] * f[i] * vs[b]; for (let j = 0; j < K; j++) A[i][j] += w[b] * f[i] * f[j]; } }
+        const sw = w.reduce((a, v) => a + v, 0);
+        if (!(sw > 0)) return { applied: false, before: 0, after: 0 };
+        for (let i = 0; i < K; i++) A[i][i] += ridge[i] * 0.05 * sw;
+        c = solve(A, r); if (!c) return { applied: false, before: 0, after: 0 };
+        const res = Array.from(vs, (v, b) => v - basis(th[b]).reduce((a, f, i) => a + f * c[i], 0));
+        const sc = 1.4826 * median(res.filter((_, b) => w0[b] > 0).map(Math.abs)) + 1e-6 + 0.004 * vmax;
+        w = Float64Array.from(res, (e, b) => { const u = e / (4.685 * sc); return Math.abs(u) < 1 ? w0[b] * (1 - u * u) ** 2 : 0; });
+      }
+    }
+    const gp = (t) => basis(t).reduce((a, f, i) => a + f * c[i], 0);
+    const ratio = Array.from(val, (v, b) => (w[b] > 0.2 ? v / sc_[grp[b]] / Math.max(1e-6, gp(th[b])) : NaN));
+    const half = Math.max(2, Math.round(nb / 14)), corr = new Float64Array(nb);
+    for (let b = 0; b < nb; b++) {
+      const win = []; for (let k = b - half; k <= b + half; k++) if (k >= 0 && k < nb && ratio[k] === ratio[k]) win.push(ratio[k]);
+      corr[b] = win.length >= half ? Math.min(1.25, Math.max(0.8, median(win))) : 1;
+    }
+    const g = (t) => { const x = ((t - th0) / (th1 - th0)) * nb - 0.5, i = Math.max(0, Math.min(nb - 2, Math.floor(x))), f = Math.max(0, Math.min(1, x - i)); return gp(t) * (corr[i] * (1 - f) + corr[i + 1] * f); };
+    const curve = Array.from(th, g), gmax = Math.max(...curve), gmin = Math.min(...curve);
+    if (!(gmax > 20) || gmin <= 0.15 * gmax) return { applied: false, before: 0, after: 0, curve };
+    const before = 1 - gmin / gmax;
+    if (before < 0.02) return { applied: false, before, after: before, curve };
+    const gain = new Float32Array(W);
+    for (let x = 0; x < W; x++) gain[x] = Math.min(maxGain, gmax / Math.max(1e-6, g(th0 + ((th1 - th0) * (x + 0.5)) / W)));
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * ch, k = gain[x]; pix[i] *= k; pix[i + 1] *= k; pix[i + 2] *= k; }
+    return { applied: true, before, after: 0, curve, gain };
+  }
+
   function grayOf(S, W, H) { const g = new Float32Array(W * H); for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * S[i] + 0.587 * S[i + 1] + 0.114 * S[i + 2]; return g; }
 
-  const api = { defaultCam, fit, fitAndSnap, findEdges, warp, outSize, outline, grayOf };
+  const api = { defaultCam, fit, fitAndSnap, findEdges, warp, outSize, outline, grayOf, evenLight };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.LabelGeo = api;
 })(typeof self !== "undefined" ? self : this);
