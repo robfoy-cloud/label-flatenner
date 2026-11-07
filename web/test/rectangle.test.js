@@ -1,7 +1,6 @@
-// Does the flattened label come out as the label and nothing else? Rendered photos, six dots with
-// errors like a quick tap or the label reader: node web/test/rectangle.test.js [error % of label height] [trials] [outward bias %]
-// Columns: worst distance (mm) between the flattened rectangle's edges and the label's real edges (the
-// 0.6 mm inset included), share of the edge lying on the bottle, RMS error inside (mm), snapped count.
+// Does the flattened label come out as the label and nothing else? Rendered bottles, six dots with errors.
+// node web/test/rectangle.test.js [error % of label height] [trials] [outward bias %]   (MODE=trace: trace the outline, then unroll it)
+// Columns: worst distance (mm) between the flattened rectangle's edges and the label's real edges, share of the edge on the bottle, RMS error inside (mm).
 // harness: how well does the label map to a rectangle? (edge error, bottle included)
 const fs = require("fs"), LF = require("../engine.js");
 const G = require(process.env.LG || "../labelgeo.js");
@@ -38,9 +37,11 @@ for (const v of views) {
   const E = [], Gl = [], Rm = []; let ok = 0;
   for (let t = 0; t < trials; t++) {
     const o = {}; for (const k in truth) { const dx = truth[k][0] - cx, dy = truth[k][1] - cy; o[k] = [truth[k][0] + dx * bias / 100 + sig * gauss(), truth[k][1] + dy * bias / 100 + sig * gauss()]; }
-    const r = G.fitAndSnap(gray, W, H, o, cam);
-    if (!r) { E.push(99); Gl.push(1); Rm.push(99); continue; }
-    const at = (r.final || r.fit).at, s = score(sc, at); E.push(s.edge); Gl.push(s.glass); Rm.push(s.rms); ok += r.snapped ? 1 : 0;
+    let r = null, at = null;
+    if (process.env.MODE === "trace") { const T = G.traceLabel(gray, W, H, o); const M = T && G.unrollTraced(T, { inset: 0.006 }); if (M) { at = M.at; r = { snapped: true }; } }
+    else { r = G.fitAndSnap(gray, W, H, o, cam); if (r) at = (r.final || r.fit).at; }
+    if (!at) { E.push(99); Gl.push(1); Rm.push(99); continue; }
+    const s = score(sc, at); E.push(s.edge); Gl.push(s.glass); Rm.push(s.rms); ok += r.snapped ? 1 : 0;
   }
   F += E.filter(x=>x>2).length; N += trials; tot.e.push(med(E)); tot.g.push(med(Gl)); tot.r.push(med(Rm));
   console.log(JSON.stringify(v).padEnd(48), 'fails', E.filter(x=>x>2).length + '/' + trials, med(E).toFixed(2).padStart(6), (100 * med(Gl)).toFixed(0).padStart(4) + "%", med(Rm).toFixed(2).padStart(6), `${ok}/${trials}`);

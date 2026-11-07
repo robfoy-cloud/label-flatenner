@@ -484,11 +484,17 @@
       const A = [[a[0] * a[0], a[0], 1], [m[0] * m[0], m[0], 1], [c[0] * c[0], c[0], 1]], k = solve(A, [a[1], m[1], c[1]]);
       return k ? (s) => k[0] * s * s + k[1] * s + k[2] : (s) => a[1] + ((c[1] - a[1]) * (s - a[0])) / (c[0] - a[0] || 1);
     };
-    const band = Math.max(6, 0.08 * hT) / st;
+    const band = Math.max(6, 0.12 * hT) / st, Ls = Math.max(3, Math.round((0.025 * hT) / st));
+    // column sums, for the brightness of a strip of a column quickly
+    const CS = new Float64Array((ny + 1) * nx);
+    for (let i = 0; i < nx; i++) { let a = 0; for (let jj = 0; jj < ny; jj++) { const v = B[jj * nx + i]; a += v >= 0 ? v : 0; CS[(jj + 1) * nx + i] = a; } }
+    const colSum = (i, a, b) => { a = Math.max(0, a); b = Math.min(ny, b); return b > a ? (CS[b * nx + i] - CS[a * nx + i]) / (b - a) : NaN; };
     function trace(guide, sign, sL, sR) {
       const NEG = -1e18, lo = new Int32Array(nx), hi = new Int32Array(nx);
       for (let i = 0; i < nx; i++) { const c = (guide(s0 + i * st) - t0) / st; lo[i] = Math.max(2, Math.floor(c - band)); hi[i] = Math.min(ny - 3, Math.ceil(c + band)); }
-      const sc = (i, j) => Math.max(0, sign * G[j * nx + i]);
+      // the change from a strip of label to a strip of what lies beyond it: a printed line near the
+      // edge has label on both sides, so it scores little; the real edge has glass beyond
+      const sc = (i, j) => { const a = colSum(i, j + 1, j + 1 + Ls), c = colSum(i, j - Ls, j); return a === a && c === c ? Math.max(0, sign * (a - c)) : 0; };
       let acc = new Float64Array(ny).fill(NEG); const back = new Int32Array(nx * ny);
       for (let j = lo[0]; j <= hi[0]; j++) acc[j] = sc(0, j);
       for (let i = 1; i < nx; i++) {
@@ -605,11 +611,18 @@
       const f = (s - pts[lo][0]) / (pts[hi][0] - pts[lo][0] || 1); return pts[lo][1] + f * (pts[hi][1] - pts[lo][1]);
     };
     const TT = curveT(top), TB = curveT(bot), inset = opts.inset ?? 0.004;
+    // down each column, equal steps on the bottle shrink in the photo towards the point where the
+    // bottle's sides meet (its vanishing point): space the rows by that perspective
+    const c = T.corners, crossL = (p1, p2, p3, p4) => { const d = (p1[0] - p2[0]) * (p3[1] - p4[1]) - (p1[1] - p2[1]) * (p3[0] - p4[0]); if (Math.abs(d) < 1e-9) return null;
+      const a1 = p1[0] * p2[1] - p1[1] * p2[0], a2 = p3[0] * p4[1] - p3[1] * p4[0]; return [(a1 * (p3[0] - p4[0]) - (p1[0] - p2[0]) * a2) / d, (a1 * (p3[1] - p4[1]) - (p1[1] - p2[1]) * a2) / d]; };
+    const V = crossL(c.tl, c.bl, c.tr, c.br);
     const at = (u, v) => {
       u = inset + (1 - 2 * inset) * u; v = inset + (1 - 2 * inset) * v;
       const th = thL + u * (thR - thL), s = sc + a * Math.sin(th), sb = fromT(s);
-      const p = [s, TT(s)], q = [sb, TB(sb)];
-      return T.toImg(p[0] + (q[0] - p[0]) * v, p[1] + (q[1] - p[1]) * v);
+      const A = T.toImg(s, TT(s)), Bq = T.toImg(sb, TB(sb)), dx = Bq[0] - A[0], dy = Bq[1] - A[1], L2 = dx * dx + dy * dy;
+      let lam = v;
+      if (V && L2 > 0) { const lv = ((V[0] - A[0]) * dx + (V[1] - A[1]) * dy) / L2; if (Math.abs(lv) > 1.05 && Math.abs(lv) < 1e6) lam = (v * lv) / (lv - 1 + v); }
+      return [A[0] + dx * lam, A[1] + dy * lam];
     };
     // size: width round the bottle; height along it, corrected for looking down (or up) at it
     let b = 0; { let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; for (const [s, t, w] of P) { if (w) continue; const x = Math.sqrt(Math.max(0, 1 - ((s - sc) / a) ** 2)); n++; sx += x; sy += t; sxx += x * x; sxy += x * t; } b = Math.abs((n * sxy - sx * sy) / (n * sxx - sx * sx || 1)); }
