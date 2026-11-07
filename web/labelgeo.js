@@ -384,9 +384,9 @@
       return R.at(lef + (rig - lef) * u, top + (bot - top) * v);
     };
     // where the label runs round to (or behind) the bottle's outline, the photo has almost nothing
-    // of it: leave out the strip seen at less than a tenth of the detail at the front
+    // of it: leave out the strip seen at less than a seventh of the detail at the front
     const g = [], n = 40; for (let i = 0; i <= n; i++) { const u = i / n, a = at0(Math.max(0, u - 0.01), 0.5), b = at0(Math.min(1, u + 0.01), 0.5); g.push(Math.hypot(a[0] - b[0], a[1] - b[1])); }
-    const gmax = Math.max(...g); let i0 = 0, i1 = n; while (i0 < n && g[i0] < 0.1 * gmax) i0++; while (i1 > 0 && g[i1] < 0.1 * gmax) i1--;
+    const gmax = Math.max(...g); let i0 = 0, i1 = n; while (i0 < n && g[i0] < 0.15 * gmax) i0++; while (i1 > 0 && g[i1] < 0.15 * gmax) i1--;
     const u0 = Math.max(inset, i0 / n), u1 = Math.min(1 - inset, i1 / n);
     const at = (u, v) => at0(u0 + (u1 - u0) * u, inset + (1 - 2 * inset) * v);
     return { ...R, at, corrected, aspect: R.aspect * (u1 - u0) / (1 - 2 * inset), trimmed: [u0 > inset, u1 < 1 - inset] };
@@ -449,6 +449,77 @@
     }
     const final = edges ? boundaryMap(R, findEdges2(gray, W, H, R, 0.04, findOutline(gray, W, H, R)).off, opts.inset ?? 0.006) : R;
     return { fit: R, final, snapped: !!edges, edges, dotsOnly: R0 };
+  }
+
+  // ---------------------------------------------------------------- finding the label without dots
+  /* On a bottle the label's top edge is one continuous curve across the bottle, glass above and
+     label below, and its bottom edge another, label above and glass below. Find each as the best
+     smooth path across the photo through the strongest such changes in brightness, keep the part
+     of it that is strong, and place the six dots at its ends and middle. Returns
+     {dots, top, bottom, strength} in photo pixels, or null. */
+  function autoDots(gray, W, H, opts = {}) {
+    const k = Math.min(1, (opts.size || 640) / Math.max(W, H)), w = Math.max(8, Math.round(W * k)), h = Math.max(8, Math.round(H * k));
+    // shrink, then blur lightly
+    const g = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let a = 0, n = 0; const x0 = Math.floor(x / k), x1 = Math.max(x0 + 1, Math.floor((x + 1) / k)), y0 = Math.floor(y / k), y1 = Math.max(y0 + 1, Math.floor((y + 1) / k));
+      for (let yy = y0; yy < y1 && yy < H; yy += 1) for (let xx = x0; xx < x1 && xx < W; xx += 1) { const v = gray[yy * W + xx]; if (v === v) { a += v; n++; } }
+      g[y * w + x] = n ? a / n : 0;
+    }
+    const b = new Float32Array(w * h), t = new Float32Array(w * h), K = [1, 4, 6, 4, 1];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let a = 0, n = 0; for (let i = -2; i <= 2; i++) { const xx = x + i; if (xx >= 0 && xx < w) { a += K[i + 2] * g[y * w + xx]; n += K[i + 2]; } } t[y * w + x] = a / n; }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let a = 0, n = 0; for (let i = -2; i <= 2; i++) { const yy = y + i; if (yy >= 0 && yy < h) { a += K[i + 2] * t[yy * w + x]; n += K[i + 2]; } } b[y * w + x] = a / n; }
+    const gy = new Float32Array(w * h);
+    for (let y = 1; y < h - 1; y++) for (let x = 0; x < w; x++) gy[y * w + x] = (b[(y + 1) * w + x] - b[(y - 1) * w + x]) / 2;
+    // best path left to right; sign +1: dark above, light below (a top edge); -1: the reverse
+    function path(sign, yMin, yMax) {
+      const step = 2, pen = 0.3, NEG = -1e18;
+      let acc = new Float64Array(h).fill(NEG); const back = new Int16Array(w * h);
+      const sc = (x, y) => (y < yMin || y > yMax ? NEG / 4 : Math.max(0, sign * gy[y * w + x]));
+      for (let y = 0; y < h; y++) acc[y] = sc(0, y);
+      for (let x = 1; x < w; x++) {
+        const nxt = new Float64Array(h);
+        for (let y = 0; y < h; y++) {
+          let best = NEG, arg = y;
+          for (let d = -step; d <= step; d++) { const yy = y + d; if (yy < 0 || yy >= h) continue; const v = acc[yy] - pen * Math.abs(d); if (v > best) { best = v; arg = yy; } }
+          nxt[y] = best + sc(x, y); back[x * h + y] = arg;
+        }
+        acc = nxt;
+      }
+      let y = 0; for (let i = 1; i < h; i++) if (acc[i] > acc[y]) y = i;
+      const ys = new Int16Array(w); ys[w - 1] = y;
+      for (let x = w - 1; x > 0; x--) ys[x - 1] = back[x * h + ys[x]];
+      const st = Array.from(ys, (yy, x) => Math.max(0, sign * gy[yy * w + x]));
+      return { ys, st };
+    }
+    // the strong part of a path: the longest run of columns whose strength stays above a
+    // third of its typical strength (short gaps, such as a printed letter, are bridged)
+    function strongRun(p) {
+      const srt = Array.from(p.st).sort((a, b2) => b2 - a), ref = srt[Math.floor(srt.length * 0.2)] || 0, thr = Math.max(3, ref / 3);
+      let best = null, i = 0;
+      while (i < w) {
+        if (p.st[i] < thr) { i++; continue; }
+        let j = i, gap = 0, last = i;
+        while (j < w && gap <= Math.round(w * 0.03)) { if (p.st[j] >= thr) { last = j; gap = 0; } else gap++; j++; }
+        if (!best || last - i > best[1] - best[0]) best = [i, last];
+        i = last + 1;
+      }
+      if (!best) return null;
+      let m = 0; for (let x = best[0]; x <= best[1]; x++) m += p.st[x];
+      return { x0: best[0], x1: best[1], mean: m / (best[1] - best[0] + 1) };
+    }
+    const top = path(+1, 1, h - 2), rt = strongRun(top); if (!rt) return null;
+    // the bottom edge lies below the top edge
+    const ty = Math.max(...Array.from(top.ys).slice(rt.x0, rt.x1 + 1));
+    const bot = path(-1, Math.min(h - 3, ty + Math.round(h * 0.08)), h - 2), rb = strongRun(bot); if (!rb) return null;
+    // the label spans the columns both edges cover; if one is much shorter, the other's ends are used
+    let x0 = Math.max(rt.x0, rb.x0), x1 = Math.min(rt.x1, rb.x1);
+    if (x1 - x0 < 0.5 * Math.max(rt.x1 - rt.x0, rb.x1 - rb.x0)) { x0 = Math.min(rt.x0, rb.x0); x1 = Math.max(rt.x1, rb.x1); }
+    if (x1 - x0 < w * 0.12) return null;
+    const P = (p, x) => [(x + 0.5) / k, (p.ys[x] + 0.5) / k], xm = Math.round((x0 + x1) / 2);
+    const dots = { tl: P(top, x0), tm: P(top, xm), tr: P(top, x1), br: P(bot, x1), bm: P(bot, xm), bl: P(bot, x0) };
+    const curve = (p, a, c) => { const o = []; for (let x = a; x <= c; x++) o.push(P(p, x)); return o; };
+    return { dots, top: curve(top, rt.x0, rt.x1), bottom: curve(bot, rb.x0, rb.x1), strength: Math.min(rt.mean, rb.mean) };
   }
 
   // ---------------------------------------------------------------- flat labels
@@ -668,7 +739,7 @@
 
   function grayOf(S, W, H) { const g = new Float32Array(W * H); for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * S[i] + 0.587 * S[i + 1] + 0.114 * S[i + 2]; return g; }
 
-  const api = { defaultCam, fit, fitAndSnap, findEdges, findEdges2, findOutline, fitFlat, warp, outSize, outline, grayOf, evenLight };
+  const api = { defaultCam, fit, fitAndSnap, findEdges, findEdges2, findOutline, fitFlat, autoDots, warp, outSize, outline, grayOf, evenLight };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.LabelGeo = api;
 })(typeof self !== "undefined" ? self : this);
