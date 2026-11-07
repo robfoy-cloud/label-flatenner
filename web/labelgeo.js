@@ -460,7 +460,10 @@
      the label's corners, and the sides are the straight lines joining them.
      Returns {top, bottom, corners, toImg, frame} (top and bottom as [across, along] points in
      the frame, corners in the photo), or null. */
-  function traceLabel(gray, W, H, dots) {
+  function traceLabel(gray, W, H, dots, opts = {}) {
+    // trustDots (the default): the dots are the label's corners and the middles of its top and bottom
+    // edges, and the outline passes through them; the photo only decides how each edge curves between
+    const trust = opts.trustDots !== false;
     const I = sampler(gray, W, H), sub = (a, b) => [a[0] - b[0], a[1] - b[1]], nrm = (v) => { const l = Math.hypot(v[0], v[1]) || 1; return [v[0] / l, v[1] / l]; };
     const dv = nrm([dots.bl[0] - dots.tl[0] + dots.br[0] - dots.tr[0], dots.bl[1] - dots.tl[1] + dots.br[1] - dots.tr[1]]);
     let ev = [dv[1], -dv[0]]; if ((dots.tr[0] - dots.tl[0]) * ev[0] + (dots.tr[1] - dots.tl[1]) * ev[1] < 0) ev = [-ev[0], -ev[1]];
@@ -484,7 +487,7 @@
       const A = [[a[0] * a[0], a[0], 1], [m[0] * m[0], m[0], 1], [c[0] * c[0], c[0], 1]], k = solve(A, [a[1], m[1], c[1]]);
       return k ? (s) => k[0] * s * s + k[1] * s + k[2] : (s) => a[1] + ((c[1] - a[1]) * (s - a[0])) / (c[0] - a[0] || 1);
     };
-    const band = Math.max(6, 0.12 * hT) / st, Ls = Math.max(3, Math.round((0.025 * hT) / st));
+    const band = (trust ? Math.max(4, 0.035 * hT) : Math.max(6, 0.12 * hT)) / st, Ls = Math.max(3, Math.round((0.025 * hT) / st));
     // column sums, for the brightness of a strip of a column quickly
     const CS = new Float64Array((ny + 1) * nx);
     for (let i = 0; i < nx; i++) { let a = 0; for (let jj = 0; jj < ny; jj++) { const v = B[jj * nx + i]; a += v >= 0 ? v : 0; CS[(jj + 1) * nx + i] = a; } }
@@ -557,45 +560,58 @@
     }
     const top = trace(quad(F.tl, F.tm, F.tr), +1, F.tl[0], F.tr[0]), bot = trace(quad(F.bl, F.bm, F.br), -1, F.bl[0], F.br[0]);
     if (!top || !bot || top.pts.length < 8 || bot.pts.length < 8) return null;
-    // the sides: the strongest straight edge, running roughly along the bottle, near each side of
-    // the dots (the label's own edge, or the bottle's outline where the label wraps out of sight)
     const tAt = (pts, s) => { const i = Math.max(0, Math.min(pts.length - 1, Math.round((s - s0) / st))); return pts[i][1]; };
-    // the typical brightness of each column between the traced top and bottom edges (a median, so
-    // printed text hardly counts): it steps where the label meets glass or the background
-    const colMed = new Float64Array(nx);
-    for (let i = 0; i < nx; i++) {
-      const jT = (top.full[i][1] - t0) / st, jB = (bot.full[i][1] - t0) / st, v = [];
-      for (let jj = Math.round(jT + 0.12 * (jB - jT)); jj <= jB - 0.12 * (jB - jT); jj++) { const x = B[jj * nx + i]; if (x >= 0) v.push(x); }
-      colMed[i] = v.length ? median(v) : -1;
-    }
-    function side(sDot, dir) {
-      // the sharpest step in that brightness near the dots, then the sharpest straight edge close to it
-      // (going out from the middle, the first step that is nearly as sharp as the sharpest nearby)
-      const out = 0.1 * wS, inn = 0.1 * wS, w2 = Math.max(2, Math.round((0.012 * wS) / st)), steps = [];
-      for (let ds = -inn; ds <= out; ds += st) {
-        const c = sDot + dir * ds, i = Math.round((c - s0) / st); if (i - w2 < 0 || i + w2 >= nx) continue;
-        const a = colMed[i - w2], b2 = colMed[i + w2]; if (a < 0 || b2 < 0) continue;
-        steps.push({ c, step: Math.abs(b2 - a) });
-      }
-      const mx = Math.max(0, ...steps.map((x) => x.step)); if (mx < 10) return null;
-      let found = null; for (const x of steps) if (x.step >= 0.7 * mx) { found = x; break; }
-      // the peak of that step
-      for (const x of steps) if (Math.abs(x.c - found.c) < 0.02 * wS && x.step > found.step) found = x;
-      let best = null;
-      for (let c = found.c - 0.015 * wS; c <= found.c + 0.015 * wS; c += st) for (let m = -0.06; m <= 0.0601; m += 0.01) {
-        const tT = tAt(top.full, c), len = tAt(bot.full, c) - tT; if (!(len > 8)) continue; let sum = 0, n = 0;
-        for (let t = tT + 0.08 * len; t <= tT + 0.92 * len; t += st) { const ii = Math.round((c + m * (t - tT - len / 2) - s0) / st), jj = Math.round((t - t0) / st); if (ii < 2 || ii >= nx - 2 || jj < 0 || jj >= ny) continue; sum += Gs[jj * nx + ii]; n++; }
-        if (n >= 5 && (!best || sum / n > best.sc)) best = { sc: sum / n, c: c - (m * len) / 2, m, tT };
-      }
-      return best;
-    }
-    const L = side(Math.min(F.tl[0], F.bl[0]), -1), Rt = side(Math.max(F.tr[0], F.br[0]), +1);
-    if (L && Rt && Rt.c - L.c > 0.3 * wS) {
-      // cut the traced edges where the side lines meet them
-      const meetS = (ln, pts) => { let sx = ln.c; for (let it = 0; it < 4; it++) sx = ln.c + ln.m * (tAt(pts, sx) - ln.tT); return sx; };
-      const cut = (pts, a, b) => pts.filter((p) => p[0] >= a && p[0] <= b);
-      const tp = cut(top.full, meetS(L, top.full), meetS(Rt, top.full)), bp = cut(bot.full, meetS(L, bot.full), meetS(Rt, bot.full));
+    if (trust) {
+      // each edge between its corner dots, nudged by a smooth curve so it passes exactly through its
+      // three dots; the sides are the straight lines from corner to corner
+      const through = (tr, a, m, c) => {
+        const at = (sv) => tAt(tr.full, sv), r = [a, m, c].map((p) => [p[0], at(p[0]) - p[1]]);
+        const A = r.map(([x]) => [x * x, x, 1]), k = solve(A, r.map((q) => q[1])) || [0, 0, 0];
+        const lo = Math.min(a[0], c[0]), hi = Math.max(a[0], c[0]);
+        return tr.full.filter((p) => p[0] >= lo - 1e-9 && p[0] <= hi + 1e-9).map(([sv, t]) => [sv, t - (k[0] * sv * sv + k[1] * sv + k[2])]);
+      };
+      const tp = through(top, F.tl, F.tm, F.tr), bp = through(bot, F.bl, F.bm, F.br);
       if (tp.length >= 8 && bp.length >= 8) { top.pts = tp; bot.pts = bp; }
+    } else {
+      // the sides: the strongest straight edge, running roughly along the bottle, near each side of
+      // the dots (the label's own edge, or the bottle's outline where the label wraps out of sight)
+      // the typical brightness of each column between the traced top and bottom edges (a median, so
+      // printed text hardly counts): it steps where the label meets glass or the background
+      const colMed = new Float64Array(nx);
+      for (let i = 0; i < nx; i++) {
+        const jT = (top.full[i][1] - t0) / st, jB = (bot.full[i][1] - t0) / st, v = [];
+        for (let jj = Math.round(jT + 0.12 * (jB - jT)); jj <= jB - 0.12 * (jB - jT); jj++) { const x = B[jj * nx + i]; if (x >= 0) v.push(x); }
+        colMed[i] = v.length ? median(v) : -1;
+      }
+      function side(sDot, dir) {
+        // the sharpest step in that brightness near the dots, then the sharpest straight edge close to it
+        // (going out from the middle, the first step that is nearly as sharp as the sharpest nearby)
+        const out = 0.1 * wS, inn = 0.1 * wS, w2 = Math.max(2, Math.round((0.012 * wS) / st)), steps = [];
+        for (let ds = -inn; ds <= out; ds += st) {
+          const c = sDot + dir * ds, i = Math.round((c - s0) / st); if (i - w2 < 0 || i + w2 >= nx) continue;
+          const a = colMed[i - w2], b2 = colMed[i + w2]; if (a < 0 || b2 < 0) continue;
+          steps.push({ c, step: Math.abs(b2 - a) });
+        }
+        const mx = Math.max(0, ...steps.map((x) => x.step)); if (mx < 10) return null;
+        let found = null; for (const x of steps) if (x.step >= 0.7 * mx) { found = x; break; }
+        // the peak of that step
+        for (const x of steps) if (Math.abs(x.c - found.c) < 0.02 * wS && x.step > found.step) found = x;
+        let best = null;
+        for (let c = found.c - 0.015 * wS; c <= found.c + 0.015 * wS; c += st) for (let m = -0.06; m <= 0.0601; m += 0.01) {
+          const tT = tAt(top.full, c), len = tAt(bot.full, c) - tT; if (!(len > 8)) continue; let sum = 0, n = 0;
+          for (let t = tT + 0.08 * len; t <= tT + 0.92 * len; t += st) { const ii = Math.round((c + m * (t - tT - len / 2) - s0) / st), jj = Math.round((t - t0) / st); if (ii < 2 || ii >= nx - 2 || jj < 0 || jj >= ny) continue; sum += Gs[jj * nx + ii]; n++; }
+          if (n >= 5 && (!best || sum / n > best.sc)) best = { sc: sum / n, c: c - (m * len) / 2, m, tT };
+        }
+        return best;
+      }
+      const L = side(Math.min(F.tl[0], F.bl[0]), -1), Rt = side(Math.max(F.tr[0], F.br[0]), +1);
+      if (L && Rt && Rt.c - L.c > 0.3 * wS) {
+        // cut the traced edges where the side lines meet them
+        const meetS = (ln, pts) => { let sx = ln.c; for (let it = 0; it < 4; it++) sx = ln.c + ln.m * (tAt(pts, sx) - ln.tT); return sx; };
+        const cut = (pts, a, b) => pts.filter((p) => p[0] >= a && p[0] <= b);
+        const tp = cut(top.full, meetS(L, top.full), meetS(Rt, top.full)), bp = cut(bot.full, meetS(L, bot.full), meetS(Rt, bot.full));
+        if (tp.length >= 8 && bp.length >= 8) { top.pts = tp; bot.pts = bp; }
+      }
     }
     const corners = { tl: toImg(...top.pts[0]), tr: toImg(...top.pts[top.pts.length - 1]), br: toImg(...bot.pts[bot.pts.length - 1]), bl: toImg(...bot.pts[0]) };
     corners.tm = toImg(...top.pts[top.pts.length >> 1]); corners.bm = toImg(...bot.pts[bot.pts.length >> 1]);
