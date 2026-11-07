@@ -451,19 +451,184 @@
     return { fit: R, final, snapped: !!edges, edges, dotsOnly: R0 };
   }
 
+  // ---------------------------------------------------------------- tracing the label from its dots
+  /* Step one: the label's outline. The six dots give the bottle's direction and a rough label.
+     Working in a frame lined up with the bottle (across it and along it), the top edge is
+     traced as the best smooth path, close to the curve through the three top dots, through
+     the strongest change from glass above to label below; the bottom edge likewise, label
+     above and glass below. Each traced edge ends where it stops being strong: those ends are
+     the label's corners, and the sides are the straight lines joining them.
+     Returns {top, bottom, corners, toImg, frame} (top and bottom as [across, along] points in
+     the frame, corners in the photo), or null. */
+  function traceLabel(gray, W, H, dots) {
+    const I = sampler(gray, W, H), sub = (a, b) => [a[0] - b[0], a[1] - b[1]], nrm = (v) => { const l = Math.hypot(v[0], v[1]) || 1; return [v[0] / l, v[1] / l]; };
+    const dv = nrm([dots.bl[0] - dots.tl[0] + dots.br[0] - dots.tr[0], dots.bl[1] - dots.tl[1] + dots.br[1] - dots.tr[1]]);
+    let ev = [dv[1], -dv[0]]; if ((dots.tr[0] - dots.tl[0]) * ev[0] + (dots.tr[1] - dots.tl[1]) * ev[1] < 0) ev = [-ev[0], -ev[1]];
+    const O = dots.tl, toF = (p) => { const q = sub(p, O); return [q[0] * ev[0] + q[1] * ev[1], q[0] * dv[0] + q[1] * dv[1]]; };
+    const toImg = (s, t) => [O[0] + s * ev[0] + t * dv[0], O[1] + s * ev[1] + t * dv[1]];
+    const F = {}; for (const k of ["tl", "tm", "tr", "br", "bm", "bl"]) F[k] = toF(dots[k]);
+    const wS = Math.max(F.tr[0], F.br[0]) - Math.min(F.tl[0], F.bl[0]), hT = (F.bl[1] - F.tl[1] + F.bm[1] - F.tm[1] + F.br[1] - F.tr[1]) / 3;
+    if (!(wS > 10 && hT > 10)) return null;
+    // the rectified strip: one sample per pixel (or coarser on a big photo)
+    const s0 = Math.min(F.tl[0], F.bl[0]) - 0.12 * wS, s1 = Math.max(F.tr[0], F.br[0]) + 0.12 * wS;
+    const t0 = Math.min(F.tl[1], F.tm[1], F.tr[1]) - 0.25 * hT, t1 = Math.max(F.bl[1], F.bm[1], F.br[1]) + 0.25 * hT;
+    const st = Math.max(1, (s1 - s0) / 900, (t1 - t0) / 1200), nx = Math.ceil((s1 - s0) / st) + 1, ny = Math.ceil((t1 - t0) / st) + 1;
+    const R = new Float32Array(nx * ny);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const p = toImg(s0 + i * st, t0 + j * st), v = I(p[0], p[1]); R[j * nx + i] = v === v ? v : -1; }
+    const B = new Float32Array(nx * ny), G = new Float32Array(nx * ny);
+    for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) { let a = 0, n = 0; for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) { const v = R[(j + dj) * nx + i + di]; if (v >= 0) { a += v; n++; } } B[j * nx + i] = n ? a / n : -1; }
+    for (let j = 2; j < ny - 2; j++) for (let i = 0; i < nx; i++) { const a = B[(j + 1) * nx + i], c = B[(j - 1) * nx + i]; G[j * nx + i] = a >= 0 && c >= 0 ? (a - c) / 2 : 0; }
+    const Gs = new Float32Array(nx * ny);
+    for (let j = 0; j < ny; j++) for (let i = 2; i < nx - 2; i++) { const a = B[j * nx + i + 1], c = B[j * nx + i - 1]; Gs[j * nx + i] = a >= 0 && c >= 0 ? Math.abs(a - c) / 2 : 0; }
+    const quad = (a, m, c) => { // t as a function of s through three points
+      const A = [[a[0] * a[0], a[0], 1], [m[0] * m[0], m[0], 1], [c[0] * c[0], c[0], 1]], k = solve(A, [a[1], m[1], c[1]]);
+      return k ? (s) => k[0] * s * s + k[1] * s + k[2] : (s) => a[1] + ((c[1] - a[1]) * (s - a[0])) / (c[0] - a[0] || 1);
+    };
+    const band = Math.max(6, 0.08 * hT) / st;
+    function trace(guide, sign, sL, sR) {
+      const NEG = -1e18, lo = new Int32Array(nx), hi = new Int32Array(nx);
+      for (let i = 0; i < nx; i++) { const c = (guide(s0 + i * st) - t0) / st; lo[i] = Math.max(2, Math.floor(c - band)); hi[i] = Math.min(ny - 3, Math.ceil(c + band)); }
+      const sc = (i, j) => Math.max(0, sign * G[j * nx + i]);
+      let acc = new Float64Array(ny).fill(NEG); const back = new Int32Array(nx * ny);
+      for (let j = lo[0]; j <= hi[0]; j++) acc[j] = sc(0, j);
+      for (let i = 1; i < nx; i++) {
+        const nxt = new Float64Array(ny).fill(NEG);
+        for (let j = lo[i]; j <= hi[i]; j++) {
+          let best = NEG, arg = j;
+          for (let d = -1; d <= 1; d++) { const jj = j + d; if (jj < 0 || jj >= ny) continue; const v = acc[jj] - 0.4 * Math.abs(d); if (v > best) { best = v; arg = jj; } }
+          nxt[j] = best + sc(i, j); back[i * ny + j] = arg;
+        }
+        acc = nxt;
+      }
+      let j = lo[nx - 1]; for (let k = lo[nx - 1]; k <= hi[nx - 1]; k++) if (acc[k] > acc[j]) j = k;
+      const ys = new Int32Array(nx); ys[nx - 1] = j; for (let i = nx - 1; i > 0; i--) ys[i - 1] = back[i * ny + ys[i]];
+      const str = Array.from(ys, (jj, i) => sc(i, jj));
+      // the edge's ends: going out from the middle, where it stops being strong (short gaps bridged)
+      const iL = Math.round((sL - s0) / st), iR = Math.round((sR - s0) / st), mid = [];
+      for (let i = Math.round(iL + 0.25 * (iR - iL)); i <= Math.round(iR - 0.25 * (iR - iL)); i++) mid.push(str[i]);
+      const ref = median(mid), thr = 0.3 * ref, gap = Math.max(3, Math.round(0.03 * (iR - iL)));
+      if (!(ref > 4)) return null;
+      const end = (from, dir) => { let i = from, last = from, g = 0; while (i >= 0 && i < nx && g <= gap) { if (str[i] >= thr) { last = i; g = 0; } else g++; i += dir; } return last; };
+      const im = Math.round((iL + iR) / 2), a = end(im, -1), c = end(im, +1);
+      const pts = []; for (let i = a; i <= c; i++) pts.push([s0 + i * st, t0 + (ys[i] + 0.5) * st]);
+      const full = []; for (let i = 0; i < nx; i++) full.push([s0 + i * st, t0 + (ys[i] + 0.5) * st]);
+      return { pts, full, a: s0 + a * st, c: s0 + c * st, strength: ref };
+    }
+    const top = trace(quad(F.tl, F.tm, F.tr), +1, F.tl[0], F.tr[0]), bot = trace(quad(F.bl, F.bm, F.br), -1, F.bl[0], F.br[0]);
+    if (!top || !bot || top.pts.length < 8 || bot.pts.length < 8) return null;
+    // the sides: the strongest straight edge, running roughly along the bottle, near each side of
+    // the dots (the label's own edge, or the bottle's outline where the label wraps out of sight)
+    const tAt = (pts, s) => { const i = Math.max(0, Math.min(pts.length - 1, Math.round((s - s0) / st))); return pts[i][1]; };
+    // the typical brightness of each column between the traced top and bottom edges (a median, so
+    // printed text hardly counts): it steps where the label meets glass or the background
+    const colMed = new Float64Array(nx);
+    for (let i = 0; i < nx; i++) {
+      const jT = (top.full[i][1] - t0) / st, jB = (bot.full[i][1] - t0) / st, v = [];
+      for (let jj = Math.round(jT + 0.12 * (jB - jT)); jj <= jB - 0.12 * (jB - jT); jj++) { const x = B[jj * nx + i]; if (x >= 0) v.push(x); }
+      colMed[i] = v.length ? median(v) : -1;
+    }
+    function side(sDot, dir) {
+      // the sharpest step in that brightness near the dots, then the sharpest straight edge close to it
+      // (going out from the middle, the first step that is nearly as sharp as the sharpest nearby)
+      const out = 0.1 * wS, inn = 0.1 * wS, w2 = Math.max(2, Math.round((0.012 * wS) / st)), steps = [];
+      for (let ds = -inn; ds <= out; ds += st) {
+        const c = sDot + dir * ds, i = Math.round((c - s0) / st); if (i - w2 < 0 || i + w2 >= nx) continue;
+        const a = colMed[i - w2], b2 = colMed[i + w2]; if (a < 0 || b2 < 0) continue;
+        steps.push({ c, step: Math.abs(b2 - a) });
+      }
+      const mx = Math.max(0, ...steps.map((x) => x.step)); if (mx < 10) return null;
+      let found = null; for (const x of steps) if (x.step >= 0.7 * mx) { found = x; break; }
+      // the peak of that step
+      for (const x of steps) if (Math.abs(x.c - found.c) < 0.02 * wS && x.step > found.step) found = x;
+      let best = null;
+      for (let c = found.c - 0.015 * wS; c <= found.c + 0.015 * wS; c += st) for (let m = -0.06; m <= 0.0601; m += 0.01) {
+        const tT = tAt(top.full, c), len = tAt(bot.full, c) - tT; if (!(len > 8)) continue; let sum = 0, n = 0;
+        for (let t = tT + 0.08 * len; t <= tT + 0.92 * len; t += st) { const ii = Math.round((c + m * (t - tT - len / 2) - s0) / st), jj = Math.round((t - t0) / st); if (ii < 2 || ii >= nx - 2 || jj < 0 || jj >= ny) continue; sum += Gs[jj * nx + ii]; n++; }
+        if (n >= 5 && (!best || sum / n > best.sc)) best = { sc: sum / n, c: c - (m * len) / 2, m, tT };
+      }
+      return best;
+    }
+    const L = side(Math.min(F.tl[0], F.bl[0]), -1), Rt = side(Math.max(F.tr[0], F.br[0]), +1);
+    if (L && Rt && Rt.c - L.c > 0.3 * wS) {
+      // cut the traced edges where the side lines meet them
+      const meetS = (ln, pts) => { let sx = ln.c; for (let it = 0; it < 4; it++) sx = ln.c + ln.m * (tAt(pts, sx) - ln.tT); return sx; };
+      const cut = (pts, a, b) => pts.filter((p) => p[0] >= a && p[0] <= b);
+      const tp = cut(top.full, meetS(L, top.full), meetS(Rt, top.full)), bp = cut(bot.full, meetS(L, bot.full), meetS(Rt, bot.full));
+      if (tp.length >= 8 && bp.length >= 8) { top.pts = tp; bot.pts = bp; }
+    }
+    const corners = { tl: toImg(...top.pts[0]), tr: toImg(...top.pts[top.pts.length - 1]), br: toImg(...bot.pts[bot.pts.length - 1]), bl: toImg(...bot.pts[0]) };
+    corners.tm = toImg(...top.pts[top.pts.length >> 1]); corners.bm = toImg(...bot.pts[bot.pts.length >> 1]);
+    const outline = top.pts.map((p) => toImg(...p)).concat(bot.pts.slice().reverse().map((p) => toImg(...p)));
+    return { top: top.pts, bottom: bot.pts, corners, outline, toImg, frame: { O, e: ev, d: dv }, strength: Math.min(top.strength, bot.strength) };
+  }
+  /* Step two: unroll the traced outline. The top and bottom edges are circles round the bottle,
+     seen as parts of ellipses; one ellipse shape (centre and half-width across the bottle) is
+     fitted to both, which gives the angle round the bottle at each point. Columns of the
+     flattened label are spaced evenly in that angle; each column runs straight from its point
+     on the traced top edge to its point on the traced bottom edge. So the label's own edges
+     become the rectangle's edges exactly. Returns a map {at(u, v), aspect, wrapDeg}. */
+  function unrollTraced(T, opts = {}) {
+    const top = T.top, bot = T.bottom, tL = top[0][0], tR = top[top.length - 1][0], bL = bot[0][0], bR = bot[bot.length - 1][0];
+    const spanT = tR - tL, spanB = bR - bL; if (!(spanT > 4 && spanB > 4)) return null;
+    // bottom edge in the top edge's across-coordinate (the label covers the same angles at both)
+    const toT = (s) => tL + ((s - bL) * spanT) / spanB, fromT = (s) => bL + ((s - tL) * spanB) / spanT;
+    const P = top.map(([s, t]) => [s, t, 0]).concat(bot.map(([s, t]) => [toT(s), t, 1]));
+    function cost(sc, a) {
+      // per edge: t = c0 + c1 * sqrt(1 - ((s - sc) / a)^2), linear least squares
+      let tot = 0;
+      for (const e of [0, 1]) {
+        let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+        for (const [s, t, w] of P) { if (w !== e) continue; const u = (s - sc) / a; if (Math.abs(u) >= 1) return Infinity; const x = Math.sqrt(1 - u * u); n++; sx += x; sy += t; sxx += x * x; sxy += x * t; syy += t * t; }
+        const den = n * sxx - sx * sx; if (Math.abs(den) < 1e-9) return Infinity;
+        const c1 = (n * sxy - sx * sy) / den, c0 = (sy - c1 * sx) / n;
+        tot += syy - 2 * c0 * sy - 2 * c1 * sxy + n * c0 * c0 + 2 * c0 * c1 * sx + c1 * c1 * sxx;
+      }
+      return tot;
+    }
+    const mid = (tL + tR) / 2, half = spanT / 2;
+    let best = { c: Infinity, sc: mid, a: half * 50 };
+    for (let i = -10; i <= 10; i++) for (let k = 0; k <= 40; k++) {
+      const sc = mid + (i / 10) * 0.5 * half, a = half * Math.pow(30, k / 40) * 1.0005 + Math.abs(sc - mid);
+      const c = cost(sc, a); if (c < best.c) best = { c, sc, a };
+    }
+    for (let it = 0; it < 3; it++) { // refine
+      const b0 = best;
+      for (let i = -5; i <= 5; i++) for (let k = -5; k <= 5; k++) {
+        const sc = b0.sc + (i / 5) * 0.05 * half / (it + 1), a = Math.max(Math.max(Math.abs(tL - sc), Math.abs(tR - sc)) * 1.0005, b0.a * Math.pow(1.15, k / (5 * (it + 1))));
+        const c = cost(sc, a); if (c < best.c) best = { c, sc, a };
+      }
+    }
+    const { sc, a } = best, thL = Math.asin(Math.max(-1, Math.min(1, (tL - sc) / a))), thR = Math.asin(Math.max(-1, Math.min(1, (tR - sc) / a)));
+    const curveT = (pts) => (s) => { // t on a traced edge at across-position s (linear between samples)
+      if (s <= pts[0][0]) return pts[0][1]; if (s >= pts[pts.length - 1][0]) return pts[pts.length - 1][1];
+      let lo = 0, hi = pts.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (pts[m][0] <= s) lo = m; else hi = m; }
+      const f = (s - pts[lo][0]) / (pts[hi][0] - pts[lo][0] || 1); return pts[lo][1] + f * (pts[hi][1] - pts[lo][1]);
+    };
+    const TT = curveT(top), TB = curveT(bot), inset = opts.inset ?? 0.004;
+    const at = (u, v) => {
+      u = inset + (1 - 2 * inset) * u; v = inset + (1 - 2 * inset) * v;
+      const th = thL + u * (thR - thL), s = sc + a * Math.sin(th), sb = fromT(s);
+      const p = [s, TT(s)], q = [sb, TB(sb)];
+      return T.toImg(p[0] + (q[0] - p[0]) * v, p[1] + (q[1] - p[1]) * v);
+    };
+    // size: width round the bottle; height along it, corrected for looking down (or up) at it
+    let b = 0; { let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; for (const [s, t, w] of P) { if (w) continue; const x = Math.sqrt(Math.max(0, 1 - ((s - sc) / a) ** 2)); n++; sx += x; sy += t; sxx += x * x; sxy += x * t; } b = Math.abs((n * sxy - sx * sy) / (n * sxx - sx * sx || 1)); }
+    const cosEl = Math.sqrt(Math.max(0.05, 1 - Math.min(0.95, (b / a) ** 2)));
+    const hMid = TB(fromT((tL + tR) / 2)) - TT((tL + tR) / 2), width = a * Math.abs(thR - thL);
+    return { at, aspect: width / (hMid / cosEl) * (1 - 2 * inset) / (1 - 2 * inset), wrapDeg: (Math.abs(thR - thL) * 180) / Math.PI, ellipse: { sc, a, b } };
+  }
+
   // ---------------------------------------------------------------- finding the label without dots
-  /* On a bottle the label's top edge is one continuous curve across the bottle, glass above and
-     label below, and its bottom edge another, label above and glass below. Find each as the best
-     smooth path across the photo through the strongest such changes in brightness, keep the part
-     of it that is strong, and place the six dots at its ends and middle. Returns
-     {dots, top, bottom, strength} in photo pixels, or null. */
-  function autoDots(gray, W, H, opts = {}) {
-    const k = Math.min(1, (opts.size || 640) / Math.max(W, H)), w = Math.max(8, Math.round(W * k)), h = Math.max(8, Math.round(H * k));
-    // shrink, then blur lightly
+  /* The photo shrunk to about `size` pixels, lightly blurred, and its vertical change in
+     brightness (positive where it gets lighter going down). Kept for the last photo used. */
+  let fieldCache = null;
+  function edgeField(gray, W, H, size = 640) {
+    if (fieldCache && fieldCache.gray === gray && fieldCache.size === size) return fieldCache;
+    const k = Math.min(1, size / Math.max(W, H)), w = Math.max(8, Math.round(W * k)), h = Math.max(8, Math.round(H * k));
     const g = new Float32Array(w * h);
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       let a = 0, n = 0; const x0 = Math.floor(x / k), x1 = Math.max(x0 + 1, Math.floor((x + 1) / k)), y0 = Math.floor(y / k), y1 = Math.max(y0 + 1, Math.floor((y + 1) / k));
-      for (let yy = y0; yy < y1 && yy < H; yy += 1) for (let xx = x0; xx < x1 && xx < W; xx += 1) { const v = gray[yy * W + xx]; if (v === v) { a += v; n++; } }
+      for (let yy = y0; yy < y1 && yy < H; yy++) for (let xx = x0; xx < x1 && xx < W; xx++) { const v = gray[yy * W + xx]; if (v === v) { a += v; n++; } }
       g[y * w + x] = n ? a / n : 0;
     }
     const b = new Float32Array(w * h), t = new Float32Array(w * h), K = [1, 4, 6, 4, 1];
@@ -471,36 +636,45 @@
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let a = 0, n = 0; for (let i = -2; i <= 2; i++) { const yy = y + i; if (yy >= 0 && yy < h) { a += K[i + 2] * t[yy * w + x]; n += K[i + 2]; } } b[y * w + x] = a / n; }
     const gy = new Float32Array(w * h);
     for (let y = 1; y < h - 1; y++) for (let x = 0; x < w; x++) gy[y * w + x] = (b[(y + 1) * w + x] - b[(y - 1) * w + x]) / 2;
-    // best path left to right; sign +1: dark above, light below (a top edge); -1: the reverse
-    function path(sign, yMin, yMax) {
-      const step = 2, pen = 0.3, NEG = -1e18;
-      let acc = new Float64Array(h).fill(NEG); const back = new Int16Array(w * h);
-      const sc = (x, y) => (y < yMin || y > yMax ? NEG / 4 : Math.max(0, sign * gy[y * w + x]));
-      for (let y = 0; y < h; y++) acc[y] = sc(0, y);
-      for (let x = 1; x < w; x++) {
-        const nxt = new Float64Array(h);
-        for (let y = 0; y < h; y++) {
-          let best = NEG, arg = y;
-          for (let d = -step; d <= step; d++) { const yy = y + d; if (yy < 0 || yy >= h) continue; const v = acc[yy] - pen * Math.abs(d); if (v > best) { best = v; arg = yy; } }
-          nxt[y] = best + sc(x, y); back[x * h + y] = arg;
-        }
-        acc = nxt;
+    return (fieldCache = { gray, size, k, w, h, gy });
+  }
+  /* The best smooth path from column xa to xb through the strongest changes of the given sign
+     (+1: dark above, light below, as at a label's top edge; -1: the reverse), kept between
+     rows lo(x) and hi(x). Returns rows ys (per column from xa) and strengths st. */
+  function edgePath(F, sign, xa, xb, lo, hi) {
+    const { w, h, gy } = F, n = xb - xa + 1, step = 2, pen = 0.3, NEG = -1e18;
+    let acc = new Float64Array(h); const back = new Int16Array(n * h);
+    const sc = (x, y) => (y < lo(x) || y > hi(x) ? NEG / 4 : Math.max(0, sign * gy[y * w + x]));
+    for (let y = 0; y < h; y++) acc[y] = sc(xa, y);
+    for (let i = 1; i < n; i++) {
+      const x = xa + i, nxt = new Float64Array(h);
+      for (let y = 0; y < h; y++) {
+        let best = NEG, arg = y;
+        for (let d = -step; d <= step; d++) { const yy = y + d; if (yy < 0 || yy >= h) continue; const v = acc[yy] - pen * Math.abs(d); if (v > best) { best = v; arg = yy; } }
+        nxt[y] = best + sc(x, y); back[i * h + y] = arg;
       }
-      let y = 0; for (let i = 1; i < h; i++) if (acc[i] > acc[y]) y = i;
-      const ys = new Int16Array(w); ys[w - 1] = y;
-      for (let x = w - 1; x > 0; x--) ys[x - 1] = back[x * h + ys[x]];
-      const st = Array.from(ys, (yy, x) => Math.max(0, sign * gy[yy * w + x]));
-      return { ys, st };
+      acc = nxt;
     }
+    let y = 0; for (let i = 1; i < h; i++) if (acc[i] > acc[y]) y = i;
+    const ys = new Int16Array(n); ys[n - 1] = y;
+    for (let i = n - 1; i > 0; i--) ys[i - 1] = back[i * h + ys[i]];
+    return { xa, ys, st: Array.from(ys, (yy, i) => Math.max(0, sign * gy[yy * w + xa + i])) };
+  }
+  /* On a bottle the label's top edge is one continuous curve across the bottle, glass above and
+     label below, and its bottom edge another, label above and glass below. Find each as the best
+     smooth path across the photo, keep the part of it that is strong, and place the six dots at
+     its ends and middle. Returns {dots, top, bottom, strength} in photo pixels, or null. */
+  function autoDots(gray, W, H, opts = {}) {
+    const F = edgeField(gray, W, H, opts.size || 640), { k, w, h } = F;
     // the strong part of a path: the longest run of columns whose strength stays above a
     // third of its typical strength (short gaps, such as a printed letter, are bridged)
     function strongRun(p) {
-      const srt = Array.from(p.st).sort((a, b2) => b2 - a), ref = srt[Math.floor(srt.length * 0.2)] || 0, thr = Math.max(3, ref / 3);
-      let best = null, i = 0;
-      while (i < w) {
+      const srt = p.st.slice().sort((a, b2) => b2 - a), ref = srt[Math.floor(srt.length * 0.2)] || 0, thr = Math.max(3, ref / 3);
+      let best = null, i = 0; const n = p.st.length;
+      while (i < n) {
         if (p.st[i] < thr) { i++; continue; }
         let j = i, gap = 0, last = i;
-        while (j < w && gap <= Math.round(w * 0.03)) { if (p.st[j] >= thr) { last = j; gap = 0; } else gap++; j++; }
+        while (j < n && gap <= Math.round(w * 0.03)) { if (p.st[j] >= thr) { last = j; gap = 0; } else gap++; j++; }
         if (!best || last - i > best[1] - best[0]) best = [i, last];
         i = last + 1;
       }
@@ -508,15 +682,13 @@
       let m = 0; for (let x = best[0]; x <= best[1]; x++) m += p.st[x];
       return { x0: best[0], x1: best[1], mean: m / (best[1] - best[0] + 1) };
     }
-    const top = path(+1, 1, h - 2), rt = strongRun(top); if (!rt) return null;
-    // the bottom edge lies below the top edge
+    const top = edgePath(F, +1, 0, w - 1, () => 1, () => h - 2), rt = strongRun(top); if (!rt) return null;
     const ty = Math.max(...Array.from(top.ys).slice(rt.x0, rt.x1 + 1));
-    const bot = path(-1, Math.min(h - 3, ty + Math.round(h * 0.08)), h - 2), rb = strongRun(bot); if (!rb) return null;
-    // the label spans the columns both edges cover; if one is much shorter, the other's ends are used
+    const bot = edgePath(F, -1, 0, w - 1, () => Math.min(h - 3, ty + Math.round(h * 0.08)), () => h - 2), rb = strongRun(bot); if (!rb) return null;
     let x0 = Math.max(rt.x0, rb.x0), x1 = Math.min(rt.x1, rb.x1);
     if (x1 - x0 < 0.5 * Math.max(rt.x1 - rt.x0, rb.x1 - rb.x0)) { x0 = Math.min(rt.x0, rb.x0); x1 = Math.max(rt.x1, rb.x1); }
     if (x1 - x0 < w * 0.12) return null;
-    const P = (p, x) => [(x + 0.5) / k, (p.ys[x] + 0.5) / k], xm = Math.round((x0 + x1) / 2);
+    const P = (p, x) => [(x + 0.5) / k, (p.ys[x - p.xa] + 0.5) / k], xm = Math.round((x0 + x1) / 2);
     const dots = { tl: P(top, x0), tm: P(top, xm), tr: P(top, x1), br: P(bot, x1), bm: P(bot, xm), bl: P(bot, x0) };
     const curve = (p, a, c) => { const o = []; for (let x = a; x <= c; x++) o.push(P(p, x)); return o; };
     return { dots, top: curve(top, rt.x0, rt.x1), bottom: curve(bot, rb.x0, rb.x1), strength: Math.min(rt.mean, rb.mean) };
@@ -739,7 +911,7 @@
 
   function grayOf(S, W, H) { const g = new Float32Array(W * H); for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * S[i] + 0.587 * S[i + 1] + 0.114 * S[i + 2]; return g; }
 
-  const api = { defaultCam, fit, fitAndSnap, findEdges, findEdges2, findOutline, fitFlat, autoDots, warp, outSize, outline, grayOf, evenLight };
+  const api = { defaultCam, fit, fitAndSnap, findEdges, findEdges2, findOutline, fitFlat, autoDots, traceLabel, unrollTraced, warp, outSize, outline, grayOf, evenLight };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.LabelGeo = api;
 })(typeof self !== "undefined" ? self : this);
