@@ -679,7 +679,7 @@
     let b = 0; { let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; for (const [s, t, w] of P) { if (w) continue; const x = Math.sqrt(Math.max(0, 1 - ((s - sc) / a) ** 2)); n++; sx += x; sy += t; sxx += x * x; sxy += x * t; } b = Math.abs((n * sxy - sx * sy) / (n * sxx - sx * sx || 1)); }
     const cosEl = Math.sqrt(Math.max(0.05, 1 - Math.min(0.95, (b / a) ** 2)));
     const hMid = TB(fromT((tL + tR) / 2)) - TT((tL + tR) / 2), width = a * Math.abs(thR - thL);
-    return { at, aspect: width / (hMid / cosEl) * (1 - 2 * inset) / (1 - 2 * inset), wrapDeg: (Math.abs(thR - thL) * 180) / Math.PI, ellipse: { sc, a, b } };
+    return { at, aspect: width / (hMid / cosEl) * (1 - 2 * inset) / (1 - 2 * inset), wrapDeg: (Math.abs(thR - thL) * 180) / Math.PI, theta: [thL + inset * (thR - thL), thR - inset * (thR - thL)], ellipse: { sc, a, b } };
   }
 
   // ---------------------------------------------------------------- finding the label without dots
