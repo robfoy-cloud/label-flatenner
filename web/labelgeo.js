@@ -35,8 +35,10 @@
   const proj = (P) => [P[0] / P[2], P[1] / P[2]];
   function curvePts(g, s, n) { const a = []; for (let i = 0; i <= n; i++) a.push(proj(surf(g, g.thl + ((g.thr - g.thl) * i) / n, s))); return a; }
   function distPoly(q, pts) {
-    let best = Infinity;
-    for (let i = 1; i < pts.length; i++) {
+    let best = Infinity, i0 = 1, i1 = pts.length;
+    // q[2], if given, is roughly where along the curve (0 to 1) the point lies: search only near it
+    if (q.length > 2) { const c = Math.round(q[2] * (pts.length - 1)); i0 = Math.max(1, c - 8); i1 = Math.min(pts.length, c + 9); }
+    for (let i = i0; i < i1; i++) {
       const a = pts[i - 1], b = pts[i], vx = b[0] - a[0], vy = b[1] - a[1], L2 = vx * vx + vy * vy || 1e-30;
       const t = Math.max(0, Math.min(1, ((q[0] - a[0]) * vx + (q[1] - a[1]) * vy) / L2));
       best = Math.min(best, Math.hypot(q[0] - a[0] - t * vx, q[1] - a[1] - t * vy));
@@ -56,6 +58,13 @@
       for (const [k, th] of [["left", g.thl], ["right", g.thr]]) {
         const a = proj(surf(g, th, g.st)), b = proj(surf(g, th, g.sb)), vx = b[0] - a[0], vy = b[1] - a[1], L = Math.hypot(vx, vy);
         for (const q of O.edges[k]) r.push(((q[0] - a[0]) * vy - (q[1] - a[1]) * vx) / L);
+      }
+      // the bottle's outline beside the label: the line round the bottle where the view grazes it
+      const lim = Math.acos(Math.min(1, 1 / g.D)), lo = g.thl < g.thr ? -lim : lim;
+      for (const [k, th] of [["oleft", lo], ["oright", -lo]]) {
+        if (!O.edges[k] || !O.edges[k].length) continue;
+        const a = proj(surf(g, th, g.st)), b = proj(surf(g, th, g.sb)), vx = b[0] - a[0], vy = b[1] - a[1], L = Math.hypot(vx, vy);
+        for (const q of O.edges[k]) r.push(0.5 * ((q[0] - a[0]) * vy - (q[1] - a[1]) * vx) / L);
       }
     }
     const lim = Math.acos(1 / g.D);               // the label must stay on the visible side
@@ -105,10 +114,10 @@
 
   // Normalised observations (divide by f); edges optional.
   function observe(dots, cam, edges, dotW) {
-    const n = (p) => [(p[0] - cam.cx) / cam.f, (p[1] - cam.cy) / cam.f];
+    const n = (p) => (p.length > 2 ? [(p[0] - cam.cx) / cam.f, (p[1] - cam.cy) / cam.f, p[2]] : [(p[0] - cam.cx) / cam.f, (p[1] - cam.cy) / cam.f]);
     const O = { dotW: dotW ?? 1 };
     for (const k of KEYS) O[k] = n(dots[k]);
-    if (edges) O.edges = { top: edges.top.map(n), bottom: edges.bottom.map(n), left: edges.left.map(n), right: edges.right.map(n) };
+    if (edges) { O.edges = {}; for (const k in edges) O.edges[k] = edges[k].map(n); }
     return O;
   }
   function basis(O) {
@@ -153,6 +162,7 @@
       x: sol.x, B, cam, cost: sol.cost, theta: [tA, tB],
       wrapDeg: (Math.abs(g.thr - g.thl) * 180) / Math.PI,
       aspect: Math.abs(g.thr - g.thl) / Math.abs(g.sb - g.st),
+      lim: Math.acos(Math.min(1, 1 / g.D)),          // the bottle's outline, as an angle round it
       at(fx, fy) { return px(surf(g, tA + fx * (tB - tA), g.st + fy * (g.sb - g.st))); },
     };
   }
@@ -218,37 +228,265 @@
     }
     return out;
   }
-  /* Six-dot fit, then refine on the label's edges in the photo. Returns {fit, snapped, edges}. */
-  function fitAndSnap(gray, W, H, dots, cam) {
+  /* Search for the label's edges along lines laid on the bottle itself: across the top and
+     bottom edges the lines run along the bottle, across the side edges they run round it (and
+     stop short of the bottle's outline, so the background beyond it is never mistaken for
+     label). On each line the glass level is taken from its outer end and the label level from
+     its inner end, so uneven light across the label doesn't matter; scanning in from the
+     glass, the edge is the first place the brightness reaches the label's level and stays
+     there. reach is in label widths (sides) or heights (top and bottom).
+     Returns image points per side, and for each the offset from the fitted edge (label units). */
+  function findEdges2(gray, W, H, R, reach, outline) {
+    const I = sampler(gray, W, H), out = { top: [], bottom: [], left: [], right: [] }, off = { top: [], bottom: [], left: [], right: [] };
+    const span = R.theta[1] - R.theta[0], lim = 0.985 * R.lim;
+    // how far past a side edge (in label widths) before the bottle's outline
+    const fxMax = (dir) => { const th = dir > 0 ? R.theta[1] : R.theta[0], go = dir * Math.sign(span); return (go > 0 ? lim - th : th + lim) / Math.abs(span); };
+    const plen = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+    for (const side of ["top", "bottom", "left", "right"]) {
+      const horiz = side === "top" || side === "bottom", N = 36;
+      for (let k = 0; k < N; k++) {
+        const s = 0.05 + (0.9 * k) / (N - 1);
+        // outward offset t (label units) -> label coordinates
+        const pt = horiz ? (t) => [s, side === "top" ? -t : 1 + t] : (t) => [side === "left" ? -t : 1 + t, s];
+        // beside the label, the search runs round the bottle up to its outline as fitted, then
+        // straight on in the photo (the fitted outline may be off while the fit is rough)
+        const tOut = reach, tIn = Math.min(reach, 0.3);
+        const tc = horiz || R.planar ? Infinity : Math.max(0, Math.min(reach, side === "left" ? fxMax(-1) : fxMax(1)));
+        const A0 = R.at(...pt(0)), Ai = R.at(...pt(-0.02)), dA = [(A0[0] - Ai[0]) / 0.02, (A0[1] - Ai[1]) / 0.02], Ac = tc < Infinity ? R.at(...pt(tc)) : null;
+        const at = (t) => (t <= tc ? R.at(...pt(t)) : [Ac[0] + (t - tc) * dA[0], Ac[1] + (t - tc) * dA[1]]);
+        const L = plen(at(-tIn), A0) + Math.hypot(dA[0], dA[1]) * tOut; if (!(L > 6 && L < 6000)) continue;
+        const n = Math.ceil(L / 0.5), ts = [], v = [], e = 0.004;
+        const tang = (() => { const a = horiz ? R.at(s - e, pt(0)[1]) : R.at(pt(0)[0], s - e), c = horiz ? R.at(s + e, pt(0)[1]) : R.at(pt(0)[0], s + e); return [(c[0] - a[0]) / 2, (c[1] - a[1]) / 2]; })();
+        // the bottle's outline, if found, ends the search
+        let ol = null;
+        if (!horiz && outline && outline[side] && outline[side].length >= 5) {
+          const p = outline[side], mx = p.reduce((a, q) => a + q[0], 0) / p.length, my = p.reduce((a, q) => a + q[1], 0) / p.length;
+          let sxx = 0, syy = 0, sxy = 0; for (const [x, y] of p) { sxx += (x - mx) ** 2; syy += (y - my) ** 2; sxy += (x - mx) * (y - my); }
+          const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy), nx = -Math.sin(ang), ny = Math.cos(ang), sd = (q) => (q[0] - mx) * nx + (q[1] - my) * ny, si = Math.sign(sd(R.at(0.5, 0.5)));
+          ol = (q) => si * sd(q);                    // > 0 on the bottle
+        }
+        for (let j = 0; j <= n; j++) {
+          const t = -tIn + ((tOut + tIn) * j) / n, a = at(t);
+          if (ol && j > 0 && ol(a) < 0) break;
+          ts.push(t); v.push((I(a[0], a[1]) + I(a[0] - tang[0], a[1] - tang[1]) + I(a[0] + tang[0], a[1] + tang[1])) / 3);
+        }
+        if (v.length < 8) continue;
+        if (v.some((x) => !(x === x))) continue;
+        const m = v.length, q = Math.max(3, Math.round(m * 0.15)), need = Math.max(4, Math.round(m * 0.03));
+        const lab = median(v.slice(0, q));
+        let hit = -1;
+        if (horiz || R.planar) {
+          // glass (or whatever is behind a flat label) from the line's outer end; scan in from it
+          const gl = median(v.slice(m - q)); if (!(Math.abs(lab - gl) >= 14)) continue;
+          const lv = v.map((x) => (x - gl) / (lab - gl));
+          for (let j = m - 2; j >= need; j--) {
+            if (lv[j] >= 0.5 && lv[j + 1] < 0.5) {
+              let ok = true; for (let i = 1; i <= need; i++) if (lv[j - i] < 0.3) { ok = false; break; }
+              if (ok) { hit = j; break; }
+            }
+          }
+          if (hit < 0) continue;
+          const y0 = lv[hit], y1 = lv[hit + 1], fr = (y0 - 0.5) / (y0 - y1), t = ts[hit] + fr * (ts[hit + 1] - ts[hit]);
+          out[side].push([...at(t), s]); off[side].push([s, t]); continue;
+        }
+        // beside the label the line may run off the bottle onto the background, so take the
+        // glass's level from just above and below the label at the same angle, and scan out
+        // from the label to the first place that stays at the glass's level
+        const gs = [];
+        // (just inside the label's span round the bottle, so it is glass even if the fit has
+        // put the side edge out at the bottle's outline)
+        for (const fy of [-0.08, -0.05, 1.05, 1.08]) for (const dx of [0.03, 0.07, 0.11]) { const a = R.at(side === "left" ? dx : 1 - dx, fy); gs.push(I(a[0], a[1])); }
+        const gl = median(gs.filter((x) => x === x));
+        if (!(Math.abs(lab - gl) >= 14)) continue;
+        const lv = v.map((x) => (x - gl) / (lab - gl));
+        // a printed line near the edge is short; the glass beside the label runs on (to the
+        // bottle's outline, or at least 4% of the label's width)
+        for (let j = Math.max(1, q >> 1); j < m - 1; j++) {
+          if (lv[j] >= 0.5 && lv[j + 1] < 0.5) {
+            const run = Math.max(need, Math.min(Math.ceil((0.04 / (tOut + tIn)) * (m - 1)), Math.floor(0.6 * (m - 1 - j))));
+            let ok = true; for (let i = 1; i <= run && j + i < m; i++) if (lv[j + i] > 0.5) { ok = false; break; }
+            if (ok) { hit = j; break; }
+          }
+        }
+        if (hit < 0) {
+          // no glass before the bottle's outline: the label runs right round to it
+          if (ol && ts[m - 1] < tOut && lv.slice(Math.round(m * 0.8)).every((x) => x >= 0.5)) { out[side].push(at(ts[m - 1])); off[side].push([s, ts[m - 1]]); }
+          continue;
+        }
+        const y0 = lv[hit], y1 = lv[hit + 1], fr = (y0 - 0.5) / (y0 - y1), t = ts[hit] + fr * (ts[hit + 1] - ts[hit]);
+        out[side].push(at(t)); off[side].push([s, t]);
+      }
+    }
+    return { pts: out, off };
+  }
+  /* The bottle's outline beside the label, found just above and below it: scanning in from
+     the background to the glass. Returns image points {left, right} (may be empty). */
+  function findOutline(gray, W, H, R) {
+    const I = sampler(gray, W, H), out = { left: [], right: [] }, span = R.theta[1] - R.theta[0], lim = 0.99 * R.lim;
+    const reachPx = 0.3 * Math.hypot(R.at(1, 0.5)[0] - R.at(0, 0.5)[0], R.at(1, 0.5)[1] - R.at(0, 0.5)[1]);
+    for (const side of ["left", "right"]) {
+      const dir = side === "left" ? -1 : 1, th = dir > 0 ? R.theta[1] : R.theta[0], go = dir * Math.sign(span);
+      const fxl = (side === "left" ? 0 : 1) + dir * Math.max(0, (go > 0 ? lim - th : th + lim) / Math.abs(span));
+      for (const fy of [-0.2, -0.16, -0.12, -0.08, -0.05, 1.05, 1.08, 1.12, 1.16, 1.2]) {
+        const A = R.at(fxl, fy), Bp = R.at(fxl - dir * 0.03, fy), d = [A[0] - Bp[0], A[1] - Bp[1]], dl = Math.hypot(d[0], d[1]);
+        if (!(dl > 0) || !(reachPx < 4000)) continue;
+        const u = [d[0] / dl, d[1] / dl], n1 = Math.min(4000, Math.ceil(Math.hypot(A[0] - R.at(0.5, fy)[0], A[1] - R.at(0.5, fy)[1]) / 0.5) || 0), n2 = Math.ceil(reachPx / 0.5), v = [], P = [];
+        for (let j = 0; j <= n1; j++) { const p = R.at(0.5 + (fxl - 0.5) * (j / n1), fy); P.push(p); v.push(I(p[0], p[1])); }
+        for (let j = 1; j <= n2; j++) { const p = [A[0] + u[0] * j * 0.5, A[1] + u[1] * j * 0.5]; P.push(p); v.push(I(p[0], p[1])); }
+        if (v.some((x) => !(x === x))) continue;
+        const m = v.length, q = Math.max(3, Math.round(n2 * 0.25)), gl = median(v.slice(Math.round(n1 * 0.4), Math.round(n1 * 0.8))), bg = median(v.slice(m - q));
+        if (!(Math.abs(bg - gl) >= 14)) continue;
+        const lv = v.map((x) => (x - bg) / (gl - bg)), need = 6;
+        for (let j = m - 2; j >= need; j--) {
+          if (lv[j] >= 0.5 && lv[j + 1] < 0.5) {
+            let ok = true; for (let i = 1; i <= need; i++) if (lv[j - i] < 0.5) { ok = false; break; }
+            if (ok) { const fr = (lv[j] - 0.5) / (lv[j] - lv[j + 1]); out[side].push([P[j][0] + fr * (P[j + 1][0] - P[j][0]), P[j][1] + fr * (P[j + 1][1] - P[j][1])]); }
+            break;
+          }
+        }
+      }
+    }
+    // keep each side only if its points lie on a line
+    for (const k of ["left", "right"]) {
+      const p = out[k]; if (p.length < 5) { out[k] = []; continue; }
+      const mx = p.reduce((a, q) => a + q[0], 0) / p.length, my = p.reduce((a, q) => a + q[1], 0) / p.length;
+      let sxx = 0, syy = 0, sxy = 0; for (const [x, y] of p) { sxx += (x - mx) ** 2; syy += (y - my) ** 2; sxy += (x - mx) * (y - my); }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy), nx = -Math.sin(ang), ny = Math.cos(ang);
+      const dd = p.map(([x, y]) => Math.abs((x - mx) * nx + (y - my) * ny)), sc = 1.4826 * median(dd) + 0.7;
+      out[k] = p.filter((_, i) => dd[i] < 3 * sc); if (out[k].length < 5) out[k] = [];
+    }
+    return out;
+  }
+  /* A smooth curve through (s, t) offsets: a robust quadratic, or null if too few agree. */
+  function smoothOffsets(st) {
+    if (st.length < 8) return null;
+    let use = st.slice(), c = null;
+    for (let it = 0; it < 3; it++) {
+      const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (const [s, t] of use) { const f = [1, s - 0.5, (s - 0.5) ** 2]; for (let i = 0; i < 3; i++) { r[i] += f[i] * t; for (let j = 0; j < 3; j++) A[i][j] += f[i] * f[j]; } }
+      for (let i = 0; i < 3; i++) A[i][i] += 1e-6;
+      c = solve(A, r); if (!c) return null;
+      const res = st.map(([s, t]) => Math.abs(t - (c[0] + c[1] * (s - 0.5) + c[2] * (s - 0.5) ** 2))), sc = 1.4826 * median(res) + 0.002;
+      use = st.filter((_, i) => res[i] < 2.5 * sc);
+      if (use.length < 8) return null;
+    }
+    return (s) => c[0] + c[1] * (s - 0.5) + c[2] * (s - 0.5) ** 2;
+  }
+  /* The final map: the fitted bottle, with its four edges moved onto the label's edges as found
+     in the photo, and pulled in by a hair, so the flattened label is bounded exactly by the
+     label's own edges: straight, square and with no glass showing. */
+  function boundaryMap(R, off, inset) {
+    const cap = (f) => (f ? (s) => Math.max(-0.06, Math.min(0.06, f(s))) : () => 0);
+    const tt = cap(smoothOffsets(off.top)), tb = cap(smoothOffsets(off.bottom)), tl = cap(smoothOffsets(off.left)), tr = cap(smoothOffsets(off.right));
+    const corrected = [off.top, off.bottom, off.left, off.right].map((o) => !!smoothOffsets(o));
+    const at0 = (u, v) => {
+      const top = -tt(u), bot = 1 + tb(u), lef = -tl(v), rig = 1 + tr(v);
+      return R.at(lef + (rig - lef) * u, top + (bot - top) * v);
+    };
+    // where the label runs round to (or behind) the bottle's outline, the photo has almost nothing
+    // of it: leave out the strip seen at less than a tenth of the detail at the front
+    const g = [], n = 40; for (let i = 0; i <= n; i++) { const u = i / n, a = at0(Math.max(0, u - 0.01), 0.5), b = at0(Math.min(1, u + 0.01), 0.5); g.push(Math.hypot(a[0] - b[0], a[1] - b[1])); }
+    const gmax = Math.max(...g); let i0 = 0, i1 = n; while (i0 < n && g[i0] < 0.1 * gmax) i0++; while (i1 > 0 && g[i1] < 0.1 * gmax) i1--;
+    const u0 = Math.max(inset, i0 / n), u1 = Math.min(1 - inset, i1 / n);
+    const at = (u, v) => at0(u0 + (u1 - u0) * u, inset + (1 - 2 * inset) * v);
+    return { ...R, at, corrected, aspect: R.aspect * (u1 - u0) / (1 - 2 * inset), trimmed: [u0 > inset, u1 < 1 - inset] };
+  }
+  /* Six-dot fit, then refine on the label's edges in the photo.
+     Returns {fit, final, snapped, edges}: draw and warp with `final`. */
+  function fitAndSnap(gray, W, H, dots, cam, opts = {}) {
     const R0 = fit(dots, cam); if (!R0) return null;
     const size = Math.hypot(R0.at(1, 0.5)[0] - R0.at(0, 0.5)[0], R0.at(1, 0.5)[1] - R0.at(0, 0.5)[1]);
-    let R = R0, edges = null, reach = Math.max(12, Math.min(80, 0.15 * size));
-    for (let pass = 0; pass < 3; pass++) {
-      const e = findEdges(gray, W, H, R, reach);
-      const enough = ["top", "bottom", "left", "right"].filter((k) => e[k].length >= 8).length;
-      if (enough < 3) break;
-      for (const k of Object.keys(e)) if (e[k].length < 8) e[k] = [];
-      let O = observe(dots, cam, e, 0.25), s = lm(R.x.slice(), R.B, O);
-      if (!s) break;
+    let R = R0, edges = null, first = true;
+    // search wide first, then closer in as the fit improves
+    for (const reach of [0.22, 0.12, 0.06, 0.035, 0.025]) {
+      const oln = findOutline(gray, W, H, R), { pts: e } = findEdges2(gray, W, H, R, reach, oln);
+      e.oleft = oln.left; e.oright = oln.right;
+      // a side that wasn't found within reach may be further out than the rough fit says
+      if (reach < 0.3 && ["top", "bottom", "left", "right"].some((k) => e[k].length < 10)) {
+        const { pts: w } = findEdges2(gray, W, H, R, 0.3, oln);
+        for (const k of ["top", "bottom", "left", "right"]) if (e[k].length < 10 && w[k].length >= 10) e[k] = w[k];
+      }
+      const enough = ["top", "bottom", "left", "right"].filter((k) => e[k].length >= 10).length;
+      // three sides are needed, except that the top and bottom alone may start a rough fit off
+      const tb = e.top.length >= 10 && e.bottom.length >= 10;
+      if (enough < 3 && !(tb && !edges)) continue;
+      for (const k of ["top", "bottom", "left", "right"]) if (e[k].length < 10) e[k] = [];
+      const dw = enough >= 3 ? 0.05 : 0.25;
+      let O = observe(dots, cam, e, dw), s = lm(R.x.slice(), R.B, O);
+      // on the first pass, also start from the usual range of bottle distances: the dots may have
+      // misled the first fit
+      if (first) {
+        first = false; let alt = null;
+        for (const x0 of starts(observe(dots, cam), R.B)) { const t = lm(x0, R.B, O, 40); if (t && (!alt || t.cost < alt.cost)) alt = t; }
+        if (alt && (!s || alt.cost < s.cost)) { const t = lm(alt.x, R.B, O); s = t && (!s || t.cost < s.cost) ? t : s; }
+      }
+      if (!s) continue;
       // drop points that disagree with the refit, then fit again
       const Rt = result(s, R.B, cam), keep = {};
       for (const k of Object.keys(e)) {
-        if (!e[k].length) { keep[k] = []; continue; }
+        if (!e[k].length || k[0] === "o") { keep[k] = e[k]; continue; }
         const fx = k === "left" ? 0 : k === "right" ? 1 : null, fy = k === "top" ? 0 : k === "bottom" ? 1 : null, pts = [];
         for (let i = 0; i <= 48; i++) pts.push(fx === null ? Rt.at(i / 48, fy) : Rt.at(fx, i / 48));
         const dd = e[k].map((q) => distPoly(q, pts)), m = median(dd), mad = median(dd.map((v) => Math.abs(v - m))) * 1.4826;
         keep[k] = e[k].filter((_, i) => dd[i] < Math.max(1.5, m + 3 * mad));
       }
-      O = observe(dots, cam, keep, 0.25); s = lm(s.x, R.B, O) || s;
-      R = result(s, R.B, cam); edges = keep; reach = Math.max(4, reach / 2);
+      O = observe(dots, cam, keep, dw); s = lm(s.x, R.B, O) || s;
+      R = result(s, R.B, cam); edges = keep;
+      if (opts.trace) opts.trace(R, reach, keep);
     }
-    // trust the snapped fit only if it stays near what the dots describe
+    // trust the snapped fit only if the label's edges were found all round (or on three sides),
+    // they fit the bottle closely, and it stays roughly where the dots are
     if (edges) {
+      const sides = ["top", "bottom", "left", "right"].filter((k) => edges[k].length >= 10), dd = [];
+      for (const k of sides) {
+        const fx = k === "left" ? 0 : k === "right" ? 1 : null, fy = k === "top" ? 0 : k === "bottom" ? 1 : null, pts = [];
+        for (let i = 0; i <= 48; i++) pts.push(fx === null ? R.at(i / 48, fy) : R.at(fx, i / 48));
+        for (const q of edges[k]) dd.push(distPoly(q, pts));
+      }
       let worst = 0;
       for (const [fx, fy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) { const a = R.at(fx, fy), b = R0.at(fx, fy); worst = Math.max(worst, Math.hypot(a[0] - b[0], a[1] - b[1])); }
-      if (worst > 0.25 * size) { R = R0; edges = null; }
+      if (sides.length < 3 || !(median(dd) < Math.max(1.5, 0.004 * size)) || worst > 0.6 * size || !(R.aspect > 0.1 && R.aspect < 10)) { R = R0; edges = null; }
     }
-    return { fit: R, snapped: !!edges, edges, dotsOnly: R0 };
+    const final = edges ? boundaryMap(R, findEdges2(gray, W, H, R, 0.04, findOutline(gray, W, H, R)).off, opts.inset ?? 0.006) : R;
+    return { fit: R, final, snapped: !!edges, edges, dotsOnly: R0 };
+  }
+
+  // ---------------------------------------------------------------- flat labels
+  function lineFit(p) {                           // robust straight line: {mx, my, nx, ny}
+    let use = p.slice(), L = null;
+    for (let it = 0; it < 3 && use.length >= 5; it++) {
+      const mx = use.reduce((a, q) => a + q[0], 0) / use.length, my = use.reduce((a, q) => a + q[1], 0) / use.length;
+      let sxx = 0, syy = 0, sxy = 0; for (const [x, y] of use) { sxx += (x - mx) ** 2; syy += (y - my) ** 2; sxy += (x - mx) * (y - my); }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy); L = { mx, my, nx: -Math.sin(ang), ny: Math.cos(ang) };
+      const dd = p.map(([x, y]) => Math.abs((x - L.mx) * L.nx + (y - L.my) * L.ny)), sc = 1.4826 * median(dd) + 0.7;
+      use = p.filter((_, i) => dd[i] < 3 * sc);
+    }
+    return use.length >= 5 ? L : null;
+  }
+  const meet = (a, b) => { const d = a.nx * b.ny - a.ny * b.nx; if (Math.abs(d) < 1e-9) return null; const ca = a.nx * a.mx + a.ny * a.my, cb = b.nx * b.mx + b.ny * b.my; return [(ca * b.ny - a.ny * cb) / d, (a.nx * cb - ca * b.nx) / d]; };
+  function planeMap(c) {
+    const h = homography([[0, 0], [1, 0], [1, 1], [0, 1]], [c.tl, c.tr, c.br, c.bl]); if (!h) return null;
+    const at = (fx, fy) => { const w = h[6] * fx + h[7] * fy + 1; return [(h[0] * fx + h[1] * fy + h[2]) / w, (h[3] * fx + h[4] * fy + h[5]) / w]; };
+    const len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+    return { planar: true, corners: c, at, theta: [0, 0], wrapDeg: 0, aspect: (len(c.tl, c.tr) + len(c.bl, c.br)) / (len(c.tl, c.bl) + len(c.tr, c.br)) };
+  }
+  /* A flat label: the four corner dots give a first quadrilateral; its sides are then moved onto
+     the label's straight edges in the photo. Returns {fit, final, snapped, edges}. */
+  function fitFlat(gray, W, H, dots, opts = {}) {
+    const R0 = planeMap({ tl: dots.tl, tr: dots.tr, br: dots.br, bl: dots.bl }); if (!R0) return null;
+    let R = R0, edges = null;
+    for (const reach of [0.2, 0.1, 0.05, 0.03]) {
+      const { pts: e } = findEdges2(gray, W, H, R, reach), L = {};
+      for (const k of ["top", "bottom", "left", "right"]) L[k] = e[k].length >= 10 ? lineFit(e[k]) : null;
+      if (!(L.top && L.bottom && L.left && L.right)) continue;
+      const c = { tl: meet(L.top, L.left), tr: meet(L.top, L.right), br: meet(L.bottom, L.right), bl: meet(L.bottom, L.left) };
+      if (!Object.values(c).every((p) => p && p.every(Number.isFinite))) continue;
+      const Rn = planeMap(c); if (!Rn || !(Rn.aspect > 0.1 && Rn.aspect < 10)) continue;
+      R = Rn; edges = e;
+    }
+    const inset = opts.inset ?? 0.006;
+    const final = edges ? { ...R, at: (u, v) => R.at(inset + (1 - 2 * inset) * u, inset + (1 - 2 * inset) * v) } : R;
+    return { fit: R, final, snapped: !!edges, edges, dotsOnly: R0 };
   }
 
   // ---------------------------------------------------------------- warping
@@ -430,7 +668,7 @@
 
   function grayOf(S, W, H) { const g = new Float32Array(W * H); for (let i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * S[i] + 0.587 * S[i + 1] + 0.114 * S[i + 2]; return g; }
 
-  const api = { defaultCam, fit, fitAndSnap, findEdges, warp, outSize, outline, grayOf, evenLight };
+  const api = { defaultCam, fit, fitAndSnap, findEdges, findEdges2, findOutline, fitFlat, warp, outSize, outline, grayOf, evenLight };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.LabelGeo = api;
 })(typeof self !== "undefined" ? self : this);
