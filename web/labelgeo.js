@@ -489,12 +489,15 @@
     const CS = new Float64Array((ny + 1) * nx);
     for (let i = 0; i < nx; i++) { let a = 0; for (let jj = 0; jj < ny; jj++) { const v = B[jj * nx + i]; a += v >= 0 ? v : 0; CS[(jj + 1) * nx + i] = a; } }
     const colSum = (i, a, b) => { a = Math.max(0, a); b = Math.min(ny, b); return b > a ? (CS[b * nx + i] - CS[a * nx + i]) / (b - a) : NaN; };
+    // the label is usually lighter than the glass, but a dark label on clear glass is the reverse:
+    // count a change of either kind (pol = 1)
+    const pol = 1;
     function trace(guide, sign, sL, sR) {
       const NEG = -1e18, lo = new Int32Array(nx), hi = new Int32Array(nx);
       for (let i = 0; i < nx; i++) { const c = (guide(s0 + i * st) - t0) / st; lo[i] = Math.max(2, Math.floor(c - band)); hi[i] = Math.min(ny - 3, Math.ceil(c + band)); }
       // the change from a strip of label to a strip of what lies beyond it: a printed line near the
       // edge has label on both sides, so it scores little; the real edge has glass beyond
-      const sc = (i, j) => { const a = colSum(i, j + 1, j + 1 + Ls), c = colSum(i, j - Ls, j); return a === a && c === c ? Math.max(0, sign * (a - c)) : 0; };
+      const sc = (i, j) => { const a = colSum(i, j + 1, j + 1 + Ls), c = colSum(i, j - Ls, j); return a === a && c === c ? Math.abs(a - c) * (sign * (a - c) > 0 ? 1 : pol) : 0; };
       let acc = new Float64Array(ny).fill(NEG); const back = new Int32Array(nx * ny);
       for (let j = lo[0]; j <= hi[0]; j++) acc[j] = sc(0, j);
       for (let i = 1; i < nx; i++) {
@@ -507,7 +510,7 @@
         acc = nxt;
       }
       let j = lo[nx - 1]; for (let k = lo[nx - 1]; k <= hi[nx - 1]; k++) if (acc[k] > acc[j]) j = k;
-      const ys = new Int32Array(nx); ys[nx - 1] = j; for (let i = nx - 1; i > 0; i--) ys[i - 1] = back[i * ny + ys[i]];
+      const ys = new Float64Array(nx); ys[nx - 1] = j; for (let i = nx - 1; i > 0; i--) ys[i - 1] = back[i * ny + ys[i]];
       const str = Array.from(ys, (jj, i) => sc(i, jj));
       // the edge's ends: going out from the middle, where it stops being strong (short gaps bridged)
       const iL = Math.round((sL - s0) / st), iR = Math.round((sR - s0) / st), mid = [];
@@ -516,7 +519,39 @@
       if (!(ref > 4)) return null;
       const end = (from, dir) => { let i = from, last = from, g = 0; while (i >= 0 && i < nx && g <= gap) { if (str[i] >= thr) { last = i; g = 0; } else g++; i += dir; } return last; };
       const im = Math.round((iL + iR) / 2), a = end(im, -1), c = end(im, +1);
-      const pts = []; for (let i = a; i <= c; i++) pts.push([s0 + i * st, t0 + (ys[i] + 0.5) * st]);
+      // the edge is one smooth curve (a circle round the bottle, seen at an angle): fit a smooth
+      // curve to the traced path, weighted by how strong the edge is and ignoring stretches that
+      // stray from it (a dark patch, a reflection, printing near the edge), and use that
+      {
+        const xs = [], yv = [], wv = [];
+        for (let i = Math.max(0, iL); i <= Math.min(nx - 1, iR); i++) { xs.push((i - (iL + iR) / 2) / Math.max(1, (iR - iL) / 2)); yv.push(ys[i]); wv.push(Math.max(0.05, str[i] / (ref || 1))); }
+        // model: t = c0 + c1 * sqrt(1 - ((x - xc) / A)^2), the shape of a circle's image across the bottle
+        const fitE = (rw) => {
+          let best = null;
+          for (let gi = -6; gi <= 6; gi++) for (let gk = 0; gk <= 24; gk++) {
+            const xc = gi * 0.05, A = (1 + Math.abs(xc)) * 1.02 * Math.pow(20, gk / 24);
+            let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0;
+            for (let k = 0; k < xs.length; k++) { const w = wv[k] * rw[k]; if (!(w > 0)) continue; const u = (xs[k] - xc) / A, f = Math.sqrt(Math.max(0, 1 - u * u)); n += w; sx += w * f; sy += w * yv[k]; sxx += w * f * f; sxy += w * f * yv[k]; syy += w * yv[k] * yv[k]; }
+            const den = n * sxx - sx * sx; if (!(Math.abs(den) > 1e-12)) continue;
+            const c1 = (n * sxy - sx * sy) / den, c0 = (sy - c1 * sx) / n, cost = syy - 2 * c0 * sy - 2 * c1 * sxy + n * c0 * c0 + 2 * c0 * c1 * sx + c1 * c1 * sxx;
+            if (!best || cost < best.cost) best = { cost, xc, A, c0, c1 };
+          }
+          return best;
+        };
+        const evalE = (e, x) => { const u = (x - e.xc) / e.A; return e.c0 + e.c1 * Math.sqrt(Math.max(0, 1 - u * u)); };
+        let rw = wv.map(() => 1), e = null;
+        for (let it = 0; it < 4; it++) {
+          e = fitE(rw); if (!e) break;
+          const res = xs.map((x, k) => yv[k] - evalE(e, x)), sc2 = 1.4826 * median(res.map(Math.abs)) + 0.5;
+          rw = res.map((r) => { const u = r / (3 * sc2); return Math.abs(u) < 1 ? (1 - u * u) ** 2 : 0; });
+        }
+        if (e) {
+          const half = Math.max(1, (iR - iL) / 2), mid2 = (iL + iR) / 2;
+          for (let i = 0; i < nx; i++) { const x = Math.max(-1.25, Math.min(1.25, (i - mid2) / half)); ys[i] = Math.max(0, Math.min(ny - 1, evalE(e, x))); }
+        }
+      }
+      // until the sides are found, the edge runs between the dots (or further, if it stays strong)
+      const pts = []; for (let i = Math.max(0, Math.min(a, iL)); i <= Math.min(nx - 1, Math.max(c, iR)); i++) pts.push([s0 + i * st, t0 + (ys[i] + 0.5) * st]);
       const full = []; for (let i = 0; i < nx; i++) full.push([s0 + i * st, t0 + (ys[i] + 0.5) * st]);
       return { pts, full, a: s0 + a * st, c: s0 + c * st, strength: ref };
     }
