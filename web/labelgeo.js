@@ -565,7 +565,12 @@
       // each edge between its corner dots, nudged by a smooth curve so it passes exactly through its
       // three dots; the sides are the straight lines from corner to corner
       const through = (tr, a, m, c) => {
-        const at = (sv) => tAt(tr.full, sv), r = [a, m, c].map((p) => [p[0], at(p[0]) - p[1]]);
+        // how far the traced edge passes from each dot: within a small tolerance the photo is trusted
+        // (a dot a few pixels off the corner shouldn't bend the edge); beyond it, the edge is pulled in.
+        // (Pulling it right through the dot, or ever more strongly further out, looks better on rendered
+        // bottles with exact dots but slants the text on real photos, where the dots are a little off)
+        const tol = 0.025 * hT, at = (sv) => tAt(tr.full, sv);
+        const r = [a, m, c].map((p) => { const e = at(p[0]) - p[1]; return [p[0], Math.abs(e) <= tol ? 0 : e - Math.sign(e) * tol]; });
         const A = r.map(([x]) => [x * x, x, 1]), k = solve(A, r.map((q) => q[1])) || [0, 0, 0];
         const lo = Math.min(a[0], c[0]), hi = Math.max(a[0], c[0]);
         return tr.full.filter((p) => p[0] >= lo - 1e-9 && p[0] <= hi + 1e-9).map(([sv, t]) => [sv, t - (k[0] * sv * sv + k[1] * sv + k[2])]);
@@ -666,20 +671,40 @@
     // bottle's sides meet (its vanishing point): space the rows by that perspective
     const c = T.corners, crossL = (p1, p2, p3, p4) => { const d = (p1[0] - p2[0]) * (p3[1] - p4[1]) - (p1[1] - p2[1]) * (p3[0] - p4[0]); if (Math.abs(d) < 1e-9) return null;
       const a1 = p1[0] * p2[1] - p1[1] * p2[0], a2 = p3[0] * p4[1] - p3[1] * p4[0]; return [(a1 * (p3[0] - p4[0]) - (p1[0] - p2[0]) * a2) / d, (a1 * (p3[1] - p4[1]) - (p1[1] - p2[1]) * a2) / d]; };
-    const V = crossL(c.tl, c.bl, c.tr, c.br);
-    const at = (u, v) => {
-      u = inset + (1 - 2 * inset) * u; v = inset + (1 - 2 * inset) * v;
-      const th = thL + u * (thR - thL), s = sc + a * Math.sin(th), sb = fromT(s);
-      const A = T.toImg(s, TT(s)), Bq = T.toImg(sb, TB(sb)), dx = Bq[0] - A[0], dy = Bq[1] - A[1], L2 = dx * dx + dy * dy;
+    const V = crossL(c.tl, c.bl, c.tr, c.br), fr = T.frame;
+    const toF = (p) => { const q = [p[0] - fr.O[0], p[1] - fr.O[1]]; return [q[0] * fr.e[0] + q[1] * fr.e[1], q[0] * fr.d[0] + q[1] * fr.d[1]]; };
+    // every line along the bottle passes through the vanishing point of its sides, so the point on the
+    // bottom edge below a point on the top edge is where the line from the vanishing point meets it
+    const Vf = V ? toF(V) : null, cTl = toF(c.tl), cBl = toF(c.bl), cTr = toF(c.tr), cBr = toF(c.br);
+    const dS = ((cBl[0] - cTl[0]) + (cBr[0] - cTr[0])) / 2, dT = ((cBl[1] - cTl[1]) + (cBr[1] - cTr[1])) / 2;
+    const below = (sA, tA) => {
+      let slope = dT ? dS / dT : 0; // ds per unit t along the line
+      if (Vf && Math.abs(Vf[1] - tA) > 1e-6 && Math.hypot(Vf[0] - sA, Vf[1] - tA) < 1e7) slope = (Vf[0] - sA) / (Vf[1] - tA);
+      let t = TB(sA + slope * (TB(sA) - tA)); for (let it = 0; it < 6; it++) t = TB(sA + slope * (t - tA));
+      return [sA + slope * (t - tA), t];
+    };
+    const core = (u, v) => {
+      const th = thL + u * (thR - thL), s = sc + a * Math.sin(th), bq = below(s, TT(s));
+      const A = T.toImg(s, TT(s)), Bq = T.toImg(bq[0], bq[1]), dx = Bq[0] - A[0], dy = Bq[1] - A[1], L2 = dx * dx + dy * dy;
       let lam = v;
       if (V && L2 > 0) { const lv = ((V[0] - A[0]) * dx + (V[1] - A[1]) * dy) / L2; if (Math.abs(lv) > 1.05 && Math.abs(lv) < 1e6) lam = (v * lv) / (lv - 1 + v); }
       return [A[0] + dx * lam, A[1] + dy * lam];
     };
+    // where the label curves round towards the bottle's outline the photo holds almost nothing of it
+    // (a smeared strip, or the background beyond it): leave out what is seen at less than 0.3 of the detail
+    // at the front; this only happens when the label wraps well over 140° round the bottle
+    const trim = opts.trim ?? 0.3, g = [], n = 50;
+    for (let i = 0; i <= n; i++) { const u = i / n, p = core(Math.max(0, u - 0.01), 0.5), q = core(Math.min(1, u + 0.01), 0.5); g.push(Math.hypot(p[0] - q[0], p[1] - q[1])); }
+    const gmax = Math.max(...g); let i0 = 0, i1 = n;
+    if (trim > 0) { while (i0 < n && g[i0] < trim * gmax) i0++; while (i1 > 0 && g[i1] < trim * gmax) i1--; }
+    if (i1 - i0 < n / 3) { i0 = 0; i1 = n; }
+    const u0 = Math.max(inset, i0 / n), u1 = Math.min(1 - inset, i1 / n);
+    const at = (u, v) => core(u0 + (u1 - u0) * u, inset + (1 - 2 * inset) * v);
     // size: width round the bottle; height along it, corrected for looking down (or up) at it
     let b = 0; { let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; for (const [s, t, w] of P) { if (w) continue; const x = Math.sqrt(Math.max(0, 1 - ((s - sc) / a) ** 2)); n++; sx += x; sy += t; sxx += x * x; sxy += x * t; } b = Math.abs((n * sxy - sx * sy) / (n * sxx - sx * sx || 1)); }
     const cosEl = Math.sqrt(Math.max(0.05, 1 - Math.min(0.95, (b / a) ** 2)));
     const hMid = TB(fromT((tL + tR) / 2)) - TT((tL + tR) / 2), width = a * Math.abs(thR - thL);
-    return { at, aspect: width / (hMid / cosEl) * (1 - 2 * inset) / (1 - 2 * inset), wrapDeg: (Math.abs(thR - thL) * 180) / Math.PI, theta: [thL + inset * (thR - thL), thR - inset * (thR - thL)], ellipse: { sc, a, b } };
+    return { at, aspect: (width * (u1 - u0)) / ((hMid / cosEl) * (1 - 2 * inset)), wrapDeg: (Math.abs(thR - thL) * 180) / Math.PI, theta: [thL + u0 * (thR - thL), thL + u1 * (thR - thL)], trimmed: [u0 > inset + 1e-9, u1 < 1 - inset - 1e-9], ellipse: { sc, a, b } };
   }
 
   // ---------------------------------------------------------------- finding the label without dots
